@@ -123,9 +123,11 @@ def process_cached_result(record: Dict[str, Any], domain: str, email: Optional[s
     if company_type == "Non-Service Business":
         company_type = "Internal IT Department"
     
-    # Create the standardized result
+    # Create the standardized result - MODIFIED: Set basic fields directly at start
     result = {
         "domain": domain,
+        "email": email,
+        "website_url": url,
         "predicted_class": company_type,
         "confidence_score": int(confidence_score * 100) if isinstance(confidence_score, float) and confidence_score <= 1.0 else int(confidence_score),
         "confidence_scores": confidence_scores,
@@ -233,12 +235,13 @@ def process_cached_result(record: Dict[str, Any], domain: str, email: Optional[s
         except Exception as e:
             logger.warning(f"Could not generate recommendations from cached data: {e}")
     
+    # REMOVED: Don't add email and URL conditionally - they're set at the beginning
     # Add email and URL if provided
-    if email:
-        result["email"] = email
+    # if email:
+    #     result["email"] = email
     
-    if url:
-        result["website_url"] = url
+    # if url:
+    #     result["website_url"] = url
     
     # Add error_type if present in record
     if record.get('ERROR_TYPE'):
