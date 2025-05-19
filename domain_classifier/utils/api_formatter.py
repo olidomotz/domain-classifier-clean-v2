@@ -7,26 +7,21 @@ logger = logging.getLogger(__name__)
 
 def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Format the API response with clearer section boundaries but still flat structure
-    for n8n workflows.
+    Format the API response with properly positioned section markers for PowerShell output.
     
     Args:
         result: The original API response
         
     Returns:
-        dict: The reformatted API response with section markers and flat structure
+        dict: The reformatted API response with effective section separators
     """
-    # Initialize the flat formatted result with section headers
-    formatted_result = {
-        "SECTION_DOMAIN_INFO": True,
-        "SECTION_CLASSIFICATION": True,
-        "SECTION_AI_DATA": True,
-        "SECTION_APOLLO_DATA": True,
-        "SECTION_MERGED_DATA": True,
-        "SECTION_RECOMMENDATIONS": True
-    }
+    # Initialize empty result
+    formatted_result = {}
     
     # ========== DOMAIN INFO SECTION ==========
+    # Use a string marker for better visibility in PowerShell
+    formatted_result["section_domain_info"] = "============ DOMAIN INFO ============"
+    
     formatted_result["domain"] = result.get("domain", "")
     formatted_result["email"] = result.get("email", "")
     formatted_result["website_url"] = result.get("website_url", "")
@@ -41,6 +36,8 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
     formatted_result["company_name"] = company_name
     
     # ========== CLASSIFICATION SECTION ==========
+    formatted_result["section_classification"] = "============ CLASSIFICATION ============"
+    
     formatted_result["classification"] = result.get("predicted_class", "")
     formatted_result["final_classification"] = result.get("final_classification", "")
     formatted_result["confidence_score"] = result.get("confidence_score", 0)
@@ -54,6 +51,8 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
     formatted_result["explanation"] = result.get("explanation", "")
     
     # ========== AI DATA SECTION ==========
+    formatted_result["section_ai_data"] = "============ AI DATA ============"
+    
     formatted_result["ai_description"] = result.get("company_description", "")
     formatted_result["ai_one_liner"] = result.get("company_one_line", "")
     
@@ -71,6 +70,8 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
             formatted_result[f"ai_{key}"] = value
     
     # ========== APOLLO DATA SECTION ==========
+    formatted_result["section_apollo_data"] = "============ APOLLO DATA ============"
+    
     apollo_data = result.get("apollo_data", {})
     if isinstance(apollo_data, str):
         try:
@@ -84,6 +85,8 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
             formatted_result[f"apollo_{key}"] = value
     
     # ========== MERGED DATA SECTION ==========
+    formatted_result["section_merged_data"] = "============ MERGED DATA ============"
+    
     # Define fields to merge with priority
     fields_to_merge = [
         "name", "industry", "employee_count", "founded_year", 
@@ -111,6 +114,8 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
             formatted_result[f"merged_{field}_source"] = source
     
     # ========== RECOMMENDATIONS SECTION ==========
+    formatted_result["section_recommendations"] = "============ RECOMMENDATIONS ============"
+    
     recommendations = result.get("domotz_recommendations", {})
     if recommendations and isinstance(recommendations, dict):
         formatted_result["rec_primary_value"] = recommendations.get("primary_value", "")
@@ -119,8 +124,8 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
     
     # ========== ERROR HANDLING ==========
     if "error" in result:
+        formatted_result["section_error"] = "============ ERROR ============"
         formatted_result["error"] = result["error"]
-        formatted_result["SECTION_ERROR"] = True
         
     if "error_type" in result:
         formatted_result["error_type"] = result["error_type"]
@@ -148,13 +153,5 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
     for field in important_fields:
         if field in result and result[field]:
             formatted_result[field] = result[field]
-            
-    # Add section END markers
-    formatted_result["SECTION_DOMAIN_INFO_END"] = True
-    formatted_result["SECTION_CLASSIFICATION_END"] = True
-    formatted_result["SECTION_AI_DATA_END"] = True
-    formatted_result["SECTION_APOLLO_DATA_END"] = True
-    formatted_result["SECTION_MERGED_DATA_END"] = True
-    formatted_result["SECTION_RECOMMENDATIONS_END"] = True
     
     return formatted_result
