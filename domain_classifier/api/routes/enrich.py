@@ -1,3 +1,4 @@
+
 """Enrichment related routes for the domain classifier API."""
 import logging
 import traceback
@@ -15,6 +16,8 @@ from domain_classifier.utils.domain_analysis import analyze_domain_words
 from domain_classifier.utils.cross_validator import reconcile_classification
 from domain_classifier.utils.json_utils import ensure_dict, safe_get
 from domain_classifier.utils.domain_utils import extract_domain_from_email, normalize_domain
+# Import the API formatter
+from domain_classifier.utils.api_formatter import format_api_response
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -33,6 +36,8 @@ def register_enrich_routes(app, snowflake_conn):
             data = request.json
             input_value = data.get('url', '').strip()
             force_reclassify = data.get('force_reclassify', False)
+            # Add parameter to control response format
+            use_new_format = data.get('use_new_format', True)
             
             if not input_value:
                 return jsonify({"error": "URL or email is required"}), 400
@@ -81,9 +86,12 @@ def register_enrich_routes(app, snowflake_conn):
                 domain_override["crawler_type"] = "override"
                 domain_override["classifier_type"] = "override"
                 
-                # Return the override directly
+                # Return the override directly with appropriate formatting
                 logger.info(f"Sending override response to client: {domain_override}")
-                return jsonify(domain_override), 200
+                if use_new_format:
+                    return jsonify(format_api_response(domain_override)), 200
+                else:
+                    return jsonify(domain_override), 200
                 
             # Direct check if domain is worth crawling or is parked
             worth_crawling, has_dns, dns_error, potentially_flaky = is_domain_worth_crawling(domain)
@@ -484,7 +492,12 @@ def register_enrich_routes(app, snowflake_conn):
             
             # Return the enriched result
             logger.info(f"Successfully enriched and generated recommendations for {domain}")
-            return jsonify(classification_result), 200
+            
+            # Format the response if requested
+            if use_new_format:
+                return jsonify(format_api_response(classification_result)), 200
+            else:
+                return jsonify(classification_result), 200
             
         except Exception as e:
             logger.error(f"Error in classify-and-enrich: {e}\n{traceback.format_exc()}")
@@ -504,7 +517,12 @@ def register_enrich_routes(app, snowflake_conn):
             if "final_classification" not in error_result:
                 error_result["final_classification"] = determine_final_classification(error_result)
                 
-            return jsonify(error_result), 200  # Return 200 instead of 500
+            # Format the response if requested
+            use_new_format = data.get('use_new_format', True) if 'data' in locals() else True
+            if use_new_format:
+                return jsonify(format_api_response(error_result)), 200  # Return 200 instead of 500
+            else:
+                return jsonify(error_result), 200  # Return 200 instead of 500
     
     def _is_minimal_apollo_data(apollo_data):
         """Check if Apollo data is minimal and needs enhancement."""
