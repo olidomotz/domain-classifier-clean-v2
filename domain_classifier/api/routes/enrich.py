@@ -1,4 +1,3 @@
-
 """Enrichment related routes for the domain classifier API."""
 import logging
 import traceback
