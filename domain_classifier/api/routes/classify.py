@@ -344,42 +344,85 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
             
             # Classify the content
             if not llm_classifier:
-                error_result = {
-                    "domain": domain, 
-                    "error": "LLM classifier is not available",
-                    "predicted_class": "Unknown",
-                    "confidence_score": 0,
-                    "confidence_scores": {
-                        "Managed Service Provider": 0,
-                        "Integrator - Commercial A/V": 0,
-                        "Integrator - Residential A/V": 0,
-                        "Internal IT Department": 0
-                    },
-                    "explanation": "Our classification system is temporarily unavailable. Please try again later.",
-                    "low_confidence": True,
-                    "website_url": url,
-                    "final_classification": "2-Internal IT",
-                    "crawler_type": crawler_type or "error_handler",
-                    "classifier_type": "error_handler"
-                }
-                
-                # Add email to error response if input was an email
-                if email:
-                    error_result["email"] = email
+                logger.error(f"LLM classifier not available for {domain}")
+                # Instead of returning an error, try a fallback method
+                try:
+                    # Import the fallback classifier
+                    from domain_classifier.classifiers.fallback_classifier import fallback_classification
+                    classification = fallback_classification(content, domain)
+                    logger.info(f"Used fallback classification for {domain} since LLM classifier is not available")
                     
-                # Format the response if requested
-                if use_new_format:
-                    return jsonify(format_api_response(error_result)), 500
-                else:
-                    return jsonify(error_result), 500
+                    # Add missing fields that would normally come from the LLM classifier
+                    classification["detection_method"] = "fallback_classification"
+                    classification["classifier_type"] = "fallback"
+                    
+                    # Use domain analysis to improve fallback classification
+                    try:
+                        from domain_classifier.utils.domain_analysis import analyze_domain_words
+                        domain_word_scores = analyze_domain_words(domain)
+                        
+                        # Check if domain name suggests security
+                        security_score = sum(1 for term in ['cyber', 'security', 'secure', 'protect'] 
+                                          if term in domain.lower())
+                        
+                        if security_score > 0:
+                            # Adjust for security domain
+                            classification["predicted_class"] = "Managed Service Provider"
+                            classification["confidence_scores"]["Managed Service Provider"] = 70
+                            classification["max_confidence"] = 0.7
+                            classification["low_confidence"] = False
+                            logger.info(f"Adjusted fallback classification to MSP based on security terms in domain name")
+                    except Exception as domain_error:
+                        logger.warning(f"Error in domain analysis during fallback: {domain_error}")
+                except Exception as fb_error:
+                    logger.error(f"Fallback classification also failed: {fb_error}")
+                    error_result = {
+                        "domain": domain,
+                        "error": "Classification failed",
+                        "predicted_class": "Unknown",
+                        "confidence_score": 0,
+                        "confidence_scores": {
+                            "Managed Service Provider": 0,
+                            "Integrator - Commercial A/V": 0,
+                            "Integrator - Residential A/V": 0,
+                            "Internal IT Department": 0
+                        },
+                        "explanation": f"We encountered an issue while analyzing {domain}.",
+                        "low_confidence": True,
+                        "website_url": url,
+                        "final_classification": "2-Internal IT",
+                        "crawler_type": crawler_type or "unknown",
+                        "classifier_type": "error_handler"
+                    }
+                    
+                    # Add email to error response if input was an email
+                    if email:
+                        error_result["email"] = email
+                        
+                    # Format the response if requested
+                    if use_new_format:
+                        return jsonify(format_api_response(error_result)), 500
+                    else:
+                        return jsonify(error_result), 500
+            else:
+                logger.info(f"Classifying content for {domain}")
+                # Pass Apollo data to the classifier if available from existing records
+                apollo_company_data = None
                 
-            logger.info(f"Classifying content for {domain}")
-            classification = llm_classifier.classify(
-                content, 
-                domain, 
-                use_vector_classification=use_vector_classification
-            )
+                # Check if we have Apollo data from a cached record
+                if 'existing_record' in locals() and existing_record and existing_record.get('APOLLO_COMPANY_DATA'):
+                    apollo_company_data = existing_record.get('APOLLO_COMPANY_DATA')
+                    logger.info(f"Using Apollo data from cached record for classification of {domain}")
+                
+                # Classify with all available information
+                classification = llm_classifier.classify(
+                    content, 
+                    domain,
+                    apollo_data=apollo_company_data,  # Pass Apollo data to classifier
+                    use_vector_classification=use_vector_classification
+                )
             
+            # If classification failed entirely
             if not classification:
                 error_result = {
                     "domain": domain,
