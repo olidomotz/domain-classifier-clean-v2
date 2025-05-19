@@ -450,6 +450,22 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
             # Log the response for debugging
             logger.info(f"Sending fresh response to client")
             
+            # ADDED: Final check for critical fields
+            critical_fields = ["domain", "email", "website_url", "crawler_type"]
+            for field in critical_fields:
+                if field == "domain" and (field not in result or not result[field]):
+                    result[field] = domain
+                    logger.info(f"Added missing domain: {domain}")
+                elif field == "email" and email and (field not in result or not result[field]):
+                    result[field] = email
+                    logger.info(f"Added missing email: {email}")
+                elif field == "website_url" and (field not in result or not result[field]):
+                    result[field] = url
+                    logger.info(f"Added missing website_url: {url}")
+                elif field == "crawler_type" and crawler_type and (field not in result or not result[field]):
+                    result[field] = crawler_type
+                    logger.info(f"Added missing crawler_type: {crawler_type}")
+            
             # Format the response if requested
             if use_new_format:
                 formatted_result = format_api_response(result)
