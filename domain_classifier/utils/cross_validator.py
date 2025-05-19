@@ -112,6 +112,14 @@ def reconcile_classification(classification: Dict[str, Any],
         'NGO', 'association', 'organization', 'municipal', 'federal', 'public sector'
     ]
     
+    # NEW: Security-related industries that should be classified as MSPs
+    security_industries = [
+        'security', 'cybersecurity', 'cyber security', 'computer security', 
+        'network security', 'information security', 'it security', 
+        'computer & network security', 'cyber defense', 'infosec',
+        'data protection', 'digital security', 'cyber risk', 'security consulting'
+    ]
+    
     # Industries that could be BOTH product and service businesses (dual nature)
     # AV integrators often fall into these categories
     dual_nature_industries = [
@@ -159,6 +167,41 @@ def reconcile_classification(classification: Dict[str, Any],
             if len(av_indicators_found) >= 2:
                 break
     
+    # NEW: Look for security indicators in the content
+    security_content_indicators = [
+        'cyber security', 'cybersecurity', 'information security', 'network security',
+        'security services', 'security solutions', 'managed security', 'vulnerability',
+        'penetration testing', 'security monitoring', 'threat', 'attack', 'malware',
+        'ransomware', 'firewall', 'intrusion', 'data breach', 'risk assessment', 
+        'security operations', 'soc', 'security operations center', 'mssp',
+        'managed security service provider'
+    ]
+    
+    has_security_indicators = False
+    security_indicators_found = []
+    for indicator in security_content_indicators:
+        if (indicator in description_lower or indicator in explanation_lower):
+            has_security_indicators = True
+            security_indicators_found.append(indicator)
+            logger.info(f"Found security indicator: '{indicator}'")
+            
+            # If we find at least 2 indicators, that's strong evidence
+            if len(security_indicators_found) >= 2:
+                break
+    
+    # Check if this is a security company
+    is_security_company = False
+    if apollo_dict:
+        apollo_industry = safe_get(apollo_dict, 'industry', '').lower()
+        if apollo_industry and any(term in apollo_industry for term in security_industries):
+            is_security_company = True
+            logger.info(f"Security industry detected for {classification.get('domain')} from Apollo: {apollo_industry}")
+    
+    # Also check content for strong security indicators
+    if has_security_indicators and len(security_indicators_found) >= 2:
+        is_security_company = True
+        logger.info(f"Security company detected from content indicators: {security_indicators_found}")
+    
     # Check if the predicted class is a service business type
     is_service = classification.get('predicted_class') in [
         'Managed Service Provider', 
@@ -173,6 +216,41 @@ def reconcile_classification(classification: Dict[str, Any],
     confidence_score = classification.get('confidence_score', 0)
     max_confidence = classification.get('max_confidence', 0.5)
     high_confidence_classification = max_confidence >= 0.7 or confidence_score >= 70
+    
+    # If it's a security company but classified as Internal IT, change to MSP
+    if is_security_company and classification.get('predicted_class') == 'Internal IT Department':
+        logger.warning(f"Cybersecurity company {domain} was misclassified as Internal IT, correcting to MSP")
+        
+        # Override classification
+        classification['predicted_class'] = 'Managed Service Provider'
+        classification['is_service_business'] = True
+        
+        # Update confidence scores
+        classification['confidence_scores'] = {
+            'Managed Service Provider': 85,
+            'Integrator - Commercial A/V': 8,
+            'Integrator - Residential A/V': 5,
+            'Internal IT Department': 0
+        }
+        
+        # Update max_confidence
+        classification['max_confidence'] = 0.85
+        
+        # Add an explanation about the cybersecurity classification
+        original_explanation = classification.get('llm_explanation', '')
+        security_note = f"\n\nNOTE: This company has been classified as a Managed Service Provider based on its cybersecurity industry focus ({apollo_industry if 'apollo_industry' in locals() else 'detected from content'})."
+        classification['llm_explanation'] = original_explanation + security_note
+        
+        # Update company description to reflect security focus
+        if apollo_dict and apollo_dict.get('name'):
+            company_name = apollo_dict.get('name')
+        else:
+            company_name = domain.split('.')[0].capitalize()
+        
+        classification['company_description'] = f"{company_name} is a cybersecurity company providing managed security services and solutions to protect organizations from cyber threats."
+        classification['company_one_line'] = f"{company_name} offers managed cybersecurity services."
+        
+        logger.info(f"Reclassified {domain} as Managed Service Provider based on security industry")
     
     # Check specifically for maritime industry contradictions
     is_maritime = False
@@ -221,10 +299,12 @@ def reconcile_classification(classification: Dict[str, Any],
         # Check if industry data suggests a non-service business
         # But be careful with dual-nature industries like consumer electronics
         apollo_non_service = apollo_industry and any(term in apollo_industry for term in non_service_industries) and \
-                            not any(term in apollo_industry for term in dual_nature_industries)
+                            not any(term in apollo_industry for term in dual_nature_industries) and \
+                            not any(term in apollo_industry for term in security_industries)  # Don't reclassify security
         
         ai_non_service = ai_industry and any(term in ai_industry for term in non_service_industries) and \
-                        not any(term in ai_industry for term in dual_nature_industries)
+                        not any(term in ai_industry for term in dual_nature_industries) and \
+                        not any(term in ai_industry for term in security_industries)  # Don't reclassify security
         
         # Potential conflict detected - industry data doesn't match classification
         should_override = False
@@ -255,6 +335,11 @@ def reconcile_classification(classification: Dict[str, Any],
         elif classification.get('predicted_class') == 'Integrator - Commercial A/V' and is_likely_internal_it:
             should_override = True
             logger.warning(f"Likely internal IT dept being misclassified as Commercial AV for {domain}")
+        
+        # NEVER override cybersecurity companies
+        elif is_security_company:
+            should_override = False
+            logger.info(f"Security company detected for {domain}, keeping classification as MSP")
         
         # For cached results with contradicting Apollo data, be more aggressive
         elif source == 'cached' and apollo_non_service:
