@@ -83,6 +83,10 @@ def detect_error_type(error_message: str) -> Tuple[str, str]:
     """
     error_message = str(error_message).lower()
     
+    # Remote disconnect detection (anti-scraping)
+    if any(phrase in error_message for phrase in ['remotedisconnected', 'remote end closed', 'connection reset', 'connection aborted']):
+        return "anti_scraping", "The website appears to be using anti-scraping protection."
+    
     # SSL Certificate errors
     if any(phrase in error_message for phrase in ['certificate has expired', 'certificate verify failed', 'ssl', 'cert']):
         if 'expired' in error_message:
@@ -147,7 +151,14 @@ def quick_parked_check(url: str) -> Tuple[bool, Optional[str]]:
             }
             
             # Set a low timeout to fail quickly
-            response = requests.get(url, headers=headers, timeout=5.0, stream=True)
+            # IMPORTANT: Set allow_redirects=True to follow redirects
+            response = requests.get(url, headers=headers, timeout=5.0, stream=True, allow_redirects=True)
+            
+            # Log redirect if it happened
+            if response.history:
+                redirect_chain = " -> ".join([r.url for r in response.history])
+                final_url = response.url
+                logger.info(f"Followed HTTPS redirect chain: {redirect_chain} -> {final_url}")
             
             # Get a chunk of content
             content = next(response.iter_content(2048), None)
@@ -191,7 +202,14 @@ def quick_parked_check(url: str) -> Tuple[bool, Optional[str]]:
                 if not http_url.startswith("http"):
                     http_url = "http://" + url
                     
-                response = requests.get(http_url, headers=headers, timeout=5.0, stream=True)
+                # IMPORTANT: Set allow_redirects=True to follow redirects
+                response = requests.get(http_url, headers=headers, timeout=5.0, stream=True, allow_redirects=True)
+                
+                # Log redirect if it happened
+                if response.history:
+                    redirect_chain = " -> ".join([r.url for r in response.history])
+                    final_url = response.url
+                    logger.info(f"Followed HTTP redirect chain: {redirect_chain} -> {final_url}")
                 
                 # Get a chunk of content
                 content = next(response.iter_content(2048), None)
@@ -238,7 +256,7 @@ def quick_parked_check(url: str) -> Tuple[bool, Optional[str]]:
 def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]], Optional[str]]:
     """
     IMPROVED: Crawl a website using Direct Crawler first, then ALWAYS try Scrapy before falling back to Apify.
-    This version ensures proper crawler priority and content selection.
+    This version ensures proper crawler priority, redirect handling, and content selection.
     
     Args:
         url (str): The URL to crawl
@@ -369,6 +387,7 @@ def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optiona
                 http_url = "http://" + domain
                 logger.info(f"Final attempt: HTTP direct crawl with higher timeout for {http_url}")
                 from domain_classifier.crawlers.direct_crawler import direct_crawl
+                # IMPORTANT: Set higher timeout and ensure redirects are followed
                 content, (final_error_type, final_error_detail), final_crawler_type = direct_crawl(http_url, timeout=15.0)
                 
                 if content and len(content.strip()) > 100:
@@ -388,6 +407,7 @@ def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optiona
 def apify_crawl(url: str, timeout: int = 60) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]]]:
     """
     Crawl a website using Apify with improved multi-stage approach for JavaScript-heavy sites.
+    Enhanced to properly handle redirects.
     
     Args:
         url: The URL to crawl
@@ -414,7 +434,10 @@ def apify_crawl(url: str, timeout: int = 60) -> Tuple[Optional[str], Tuple[Optio
             "startUrls": [{"url": url}],
             "maxCrawlingDepth": 1,
             "maxCrawlPages": 5,
-            "timeoutSecs": 30  # Reduced timeout to avoid lengthy processing
+            "timeoutSecs": 30,  # Reduced timeout to avoid lengthy processing
+            "maxRequestRetries": 3,  # Add retry capability
+            "maxRedirects": 10,    # IMPORTANT: Increase max redirects from default
+            "forceResponseEncoding": "utf-8"  # Force UTF-8 encoding for better text extraction
         }
         headers = {"Content-Type": "application/json"}
         
@@ -441,6 +464,18 @@ def apify_crawl(url: str, timeout: int = 60) -> Tuple[Optional[str], Tuple[Optio
                     data = response.json()
                     
                     if data:
+                        # Extract redirect information if available
+                        redirected_urls = []
+                        for item in data:
+                            if item.get('redirectedFrom') or item.get('redirectedTo'):
+                                redirected_urls.append({
+                                    'from': item.get('redirectedFrom', ''),
+                                    'to': item.get('url', '')
+                                })
+                        
+                        if redirected_urls:
+                            logger.info(f"Apify detected redirects: {redirected_urls}")
+                            
                         combined_text = ' '.join(item.get('text', '') for item in data if item.get('text'))
                         
                         # Check if this is a parked domain before continuing
@@ -488,6 +523,7 @@ def apify_crawl(url: str, timeout: int = 60) -> Tuple[Optional[str], Tuple[Optio
         # This happens around 30-40 seconds in
         logger.info(f"Trying direct request fallback...")
         from domain_classifier.crawlers.direct_crawler import direct_crawl
+        # IMPORTANT: Use higher timeout and ensure redirects are followed
         direct_content, (error_type, error_detail), crawler_type = direct_crawl(url, timeout=15.0)
         
         # If we got direct content, use it
@@ -502,6 +538,7 @@ def apify_crawl(url: str, timeout: int = 60) -> Tuple[Optional[str], Tuple[Optio
             http_url = 'http://' + url
             
         logger.info(f"Trying final HTTP direct crawl for {http_url}")
+        # IMPORTANT: Use higher timeout and ensure redirects are followed
         direct_content, (error_type, error_detail), crawler_type = direct_crawl(http_url, timeout=15.0)
         
         # If direct HTTP request worked, use it
