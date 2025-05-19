@@ -26,10 +26,16 @@ def process_fresh_result(classification: Dict[str, Any], domain: str, email: Opt
         dict: The processed result ready for the client
     """
     try:
+        # ADDED: Always set these critical fields at the beginning
+        result = {
+            "domain": domain,
+            "email": email,
+            "website_url": url
+        }
+        
         if classification.get("is_parked", False):
             # Special case for parked domains
-            result = {
-                "domain": domain,
+            result.update({
                 "predicted_class": "Parked Domain",
                 "confidence_score": 0,
                 "confidence_scores": {
@@ -44,7 +50,7 @@ def process_fresh_result(classification: Dict[str, Any], domain: str, email: Opt
                 "detection_method": classification.get('detection_method', 'parked_domain_detection'),
                 "source": "fresh",
                 "is_parked": True
-            }
+            })
             
             # Add one-line company description for parked domains
             result["company_one_line"] = classification.get('company_one_line', f"{domain} is a parked domain with no active business.")
@@ -192,9 +198,8 @@ def process_fresh_result(classification: Dict[str, Any], domain: str, email: Opt
             elif classification.get('predicted_class') in ["Managed Service Provider", "Integrator - Commercial A/V", "Integrator - Residential A/V"]:
                 processed_scores["Internal IT Department"] = 0
                 
-            # Create the final result
-            result = {
-                "domain": domain,
+            # Create the final result (now merging with our initial result)
+            result.update({
                 "predicted_class": classification.get('predicted_class'),
                 "confidence_score": max_confidence,
                 "confidence_scores": processed_scores,
@@ -204,7 +209,7 @@ def process_fresh_result(classification: Dict[str, Any], domain: str, email: Opt
                 "detection_method": classification.get('detection_method', 'api'),
                 "source": "fresh",
                 "is_parked": False
-            }
+            })
             
             # Add one-line company description
             result["company_one_line"] = classification.get('company_one_line', generate_one_line_description(
@@ -255,13 +260,13 @@ def process_fresh_result(classification: Dict[str, Any], domain: str, email: Opt
             preserved_crawler_type = classification.get("crawler_type", None)
             preserved_classifier_type = classification.get("classifier_type", None)
 
-        # Add website URL for clickable link if provided
-        if url:
-            result["website_url"] = url
+        # REMOVED: Don't add website URL conditionally - it's already set at the beginning
+        # if url:
+        #     result["website_url"] = url
             
-        # Add email to response if provided
-        if email:
-            result["email"] = email
+        # REMOVED: Don't add email conditionally - it's already set at the beginning
+        # if email:
+        #     result["email"] = email
         
         # Add error_type if present in classification
         if "error_type" in classification:
@@ -373,6 +378,8 @@ def process_fresh_result(classification: Dict[str, Any], domain: str, email: Opt
         # Return a basic result with error information
         error_result = {
             "domain": domain,
+            "email": email,  # ADDED: Include email in error result
+            "website_url": url,  # ADDED: Include URL in error result
             "predicted_class": classification.get('predicted_class', 'Unknown'),
             "confidence_score": 50,
             "confidence_scores": {
