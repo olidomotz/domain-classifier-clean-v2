@@ -2,7 +2,7 @@
 import requests
 import logging
 import re
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 from typing import Tuple, Optional
 
 # Set up logging
@@ -52,8 +52,15 @@ def direct_crawl(url: str, timeout: float = 15.0) -> Tuple[Optional[str], Tuple[
         
         try:
             logger.info(f"Trying HTTPS for {domain}")
-            https_response = requests.get(url, headers=headers, timeout=timeout, stream=True)
+            # IMPORTANT: Allow redirects here
+            https_response = requests.get(url, headers=headers, timeout=timeout, stream=True, allow_redirects=True)
             https_response.raise_for_status()
+            
+            # Log redirect if it happened
+            if https_response.history:
+                redirect_chain = " -> ".join([r.url for r in https_response.history])
+                final_url = https_response.url
+                logger.info(f"Followed HTTPS redirect chain: {redirect_chain} -> {final_url}")
             
             # Extract content type
             content_type = https_response.headers.get('Content-Type', '').lower()
@@ -107,8 +114,15 @@ def direct_crawl(url: str, timeout: float = 15.0) -> Tuple[Optional[str], Tuple[
         try:
             http_url = url.replace('https://', 'http://')
             logger.info(f"Trying HTTP for {domain}: {http_url}")
-            http_response = requests.get(http_url, headers=headers, timeout=timeout, stream=True)
+            # IMPORTANT: Allow redirects here as well
+            http_response = requests.get(http_url, headers=headers, timeout=timeout, stream=True, allow_redirects=True)
             http_response.raise_for_status()
+            
+            # Log redirect if it happened
+            if http_response.history:
+                redirect_chain = " -> ".join([r.url for r in http_response.history])
+                final_url = http_response.url
+                logger.info(f"Followed HTTP redirect chain: {redirect_chain} -> {final_url}")
             
             # Extract content type
             content_type = http_response.headers.get('Content-Type', '').lower()
@@ -176,7 +190,7 @@ def direct_crawl(url: str, timeout: float = 15.0) -> Tuple[Optional[str], Tuple[
         try:
             http_url = url.replace('https://', 'http://')
             logger.info(f"Final HTTP attempt for {domain}: {http_url}")
-            http_response = requests.get(http_url, headers=headers, timeout=timeout)
+            http_response = requests.get(http_url, headers=headers, timeout=timeout, allow_redirects=True)
             html_content = http_response.text
             if html_content and len(html_content.strip()) > 100:
                 # Simple cleanup
