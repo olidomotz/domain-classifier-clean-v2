@@ -23,6 +23,14 @@ def reconcile_classification(classification: Dict[str, Any],
     Returns:
         dict: The potentially modified classification
     """
+    # ADDED: Save critical fields that must be preserved throughout the process
+    critical_fields = ["domain", "email", "website_url", "crawler_type", "classifier_type"]
+    preserved_fields = {}
+    for field in critical_fields:
+        if field in classification:
+            preserved_fields[field] = classification[field]
+            logger.info(f"Preserving critical field {field}: {preserved_fields[field]}")
+    
     # Only proceed if we have Apollo or AI data to cross-validate against
     if not apollo_data and not ai_data:
         return classification
@@ -370,5 +378,17 @@ def reconcile_classification(classification: Dict[str, Any],
             classification['llm_explanation'] = original_explanation + reconciliation_note
             
             logger.info(f"Reclassified {domain} as Internal IT Department based on industry data")
+            
+            # ADDED: Restore preserved critical fields
+            for field, value in preserved_fields.items():
+                if field not in classification or not classification[field]:
+                    classification[field] = value
+                    logger.info(f"Restored critical field {field}: {value} after override")
+    
+    # ADDED: Final check to ensure critical fields were preserved
+    for field in critical_fields:
+        if field in preserved_fields and (field not in classification or not classification[field]):
+            classification[field] = preserved_fields[field]
+            logger.info(f"Final restore of critical field {field}: {preserved_fields[field]}")
     
     return classification
