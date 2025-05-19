@@ -21,8 +21,8 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
     # ========== UTILITY FUNCTION ==========
     def add_section(prefix, title, fields_dict):
         """Add a section to the flat result with the given prefix and title."""
-        # Add section marker with the section number for ordering
-        section_key = f"{prefix}_section"
+        # Add section marker with "aaa" to ensure it appears first
+        section_key = f"{prefix}_aaa_section"
         flat_result[section_key] = "=" * 20 + f" {title} " + "=" * 20
         
         # Add fields
@@ -45,7 +45,7 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
         company_name = result["ai_company_data"].get("name", "")
     
     domain_info["company_name"] = company_name
-    add_section("a", "DOMAIN INFO", domain_info)
+    add_section("01", "DOMAIN INFO", domain_info)
     
     # ========== CLASSIFICATION SECTION ==========
     classification_info = {
@@ -61,7 +61,7 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
         "source": result.get("source", ""),
         "explanation": result.get("explanation", "")
     }
-    add_section("b", "CLASSIFICATION", classification_info)
+    add_section("02", "CLASSIFICATION", classification_info)
     
     # ========== AI DATA SECTION ==========
     ai_info = {
@@ -82,7 +82,7 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
         for key, value in ai_data.items():
             ai_info[key] = value
     
-    add_section("c", "AI DATA", ai_info)
+    add_section("03", "AI DATA", ai_info)
     
     # ========== APOLLO DATA SECTION ==========
     apollo_info = {}
@@ -99,7 +99,7 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
         for key, value in apollo_data.items():
             apollo_info[key] = value
     
-    add_section("d", "APOLLO DATA", apollo_info)
+    add_section("04", "APOLLO DATA", apollo_info)
     
     # ========== MERGED DATA SECTION ==========
     merged_info = {}
@@ -130,7 +130,7 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
             merged_info[field] = value
             merged_info[f"{field}_source"] = source
     
-    add_section("e", "MERGED DATA", merged_info)
+    add_section("05", "MERGED DATA", merged_info)
     
     # ========== RECOMMENDATIONS SECTION ==========
     rec_info = {}
@@ -140,7 +140,7 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
         rec_info["recommended_plan"] = recommendations.get("recommended_plan", "")
         rec_info["use_cases"] = recommendations.get("use_cases", [])
     
-    add_section("f", "RECOMMENDATIONS", rec_info)
+    add_section("06", "RECOMMENDATIONS", rec_info)
     
     # ========== ERROR HANDLING ==========
     if "error" in result:
@@ -154,7 +154,7 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
         if "error_detail" in result:
             error_info["error_detail"] = result["error_detail"]
         
-        add_section("g", "ERROR", error_info)
+        add_section("07", "ERROR", error_info)
     
     # Handle possible misclassification warnings
     if "possible_misclassification" in result and result["possible_misclassification"]:
@@ -168,7 +168,7 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
         if "misclassification_warning" in result:
             misclass_info["misclassification_warning"] = result["misclassification_warning"]
         
-        add_section("h", "MISCLASSIFICATION WARNING", misclass_info)
+        add_section("08", "MISCLASSIFICATION WARNING", misclass_info)
     
     # Ensure any other important fields from the original result are preserved
     important_fields = [
@@ -183,6 +183,12 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
             other_info[field] = result[field]
     
     if other_info:
-        add_section("z", "OTHER INFO", other_info)
+        add_section("09", "OTHER INFO", other_info)
     
-    return flat_result
+    # Filter out empty fields if desired
+    filtered_result = {}
+    for key, value in flat_result.items():
+        if value not in [None, "", 0] or "section" in key or key.endswith("domain") or key.endswith("email") or key.endswith("website_url"):
+            filtered_result[key] = value
+    
+    return filtered_result
