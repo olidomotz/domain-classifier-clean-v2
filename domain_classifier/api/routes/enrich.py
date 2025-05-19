@@ -1,4 +1,3 @@
-
 """Enrichment related routes for the domain classifier API."""
 import logging
 import traceback
@@ -57,6 +56,9 @@ def register_enrich_routes(app, snowflake_conn):
                     
             # Create URL for checks and displaying
             url = f"https://{domain}"
+            
+            # ADDED: Debug logging for initial values
+            logger.info(f"Initial values - Domain: {domain}, Email: {email}, URL: {url}")
             
             # Cache for storing domain content to avoid multiple queries
             domain_content_cache = None
@@ -181,6 +183,52 @@ def register_enrich_routes(app, snowflake_conn):
                 response = client.post('/classify-domain', json=request_data)
                 classification_result = response.get_json()
                 status_code = response.status_code
+            
+            # ADDED: Debug logging after classification
+            logger.info(f"After classification - result keys: {list(classification_result.keys())}")
+            logger.info(f"Classification Domain: {classification_result.get('domain')}, Email: {classification_result.get('email')}, URL: {classification_result.get('website_url')}")
+            
+            # ADDED: Explicitly ensure critical fields are present
+            if "domain" not in classification_result or not classification_result["domain"]:
+                classification_result["domain"] = domain
+                logger.info(f"Added missing domain: {domain}")
+                
+            if email and ("email" not in classification_result or not classification_result["email"]):
+                classification_result["email"] = email
+                logger.info(f"Added missing email: {email}")
+                
+            if "website_url" not in classification_result or not classification_result["website_url"]:
+                classification_result["website_url"] = url
+                logger.info(f"Added missing website_url: {url}")
+            
+            # ADDED: Check for crawler_type and set if missing
+            if "crawler_type" not in classification_result or not classification_result["crawler_type"] or classification_result["crawler_type"] == "not_available":
+                logger.info(f"Setting missing crawler_type to default value from status_code: {status_code}")
+                classification_result["crawler_type"] = "classify_and_enrich_fallback"
+                
+            # ADDED: Check for confidence_scores and set if missing
+            if "confidence_scores" not in classification_result and "confidence_score" in classification_result:
+                # Create minimal confidence scores based on predicted class
+                predicted_class = classification_result.get("predicted_class", "Unknown")
+                if predicted_class in ["Managed Service Provider", "Integrator - Commercial A/V", "Integrator - Residential A/V"]:
+                    confidence_score = classification_result.get("confidence_score", 50)
+                    classification_result["confidence_scores"] = {
+                        predicted_class: confidence_score,
+                        "Internal IT Department": 0
+                    }
+                    # Add lower scores for other classes
+                    for cls in ["Managed Service Provider", "Integrator - Commercial A/V", "Integrator - Residential A/V"]:
+                        if cls != predicted_class:
+                            classification_result["confidence_scores"][cls] = max(5, int(confidence_score * 0.1))
+                elif predicted_class == "Internal IT Department":
+                    confidence_score = classification_result.get("confidence_score", 50)
+                    classification_result["confidence_scores"] = {
+                        "Managed Service Provider": 5,
+                        "Integrator - Commercial A/V": 3,
+                        "Integrator - Residential A/V": 2,
+                        "Internal IT Department": confidence_score
+                    }
+                logger.info(f"Added missing confidence_scores: {classification_result['confidence_scores']}")
             
             # We'll proceed with enrichment regardless of classification status
             # But we'll log a warning if the status code indicates an error
@@ -485,6 +533,11 @@ def register_enrich_routes(app, snowflake_conn):
                 crawler_type=crawler_type,  # Explicitly pass the crawler_type from the original classification
                 classifier_type="claude-llm-enriched"
             )
+            
+            # ADDED: Final debug logging before returning result
+            logger.info(f"Final keys before formatting: {list(classification_result.keys())}")
+            logger.info(f"Final Domain: {classification_result.get('domain')}, Email: {classification_result.get('email')}, URL: {classification_result.get('website_url')}")
+            logger.info(f"Final Crawler Type: {classification_result.get('crawler_type')}")
             
             # Return the enriched result
             logger.info(f"Successfully enriched and generated recommendations for {domain}")
