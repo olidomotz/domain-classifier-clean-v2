@@ -15,6 +15,10 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         dict: The reformatted API response
     """
+    # Debug logging for input tracking
+    logger.info(f"Input to format_api_response - keys: {list(result.keys())}")
+    logger.info(f"Domain: {result.get('domain')}, Email: {result.get('email')}, URL: {result.get('website_url')}")
+    
     # For n8n, we want a flat structure with prefixed fields
     flat_result = {}
     
@@ -25,9 +29,13 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
         section_key = f"{prefix}_aaa_section"
         flat_result[section_key] = "=" * 20 + f" {title} " + "=" * 20
         
-        # Add fields
+        # Add fields - MODIFIED: Always add critical fields regardless of value
+        critical_fields = ["domain", "email", "website_url", "classification", "final_classification", 
+                         "confidence_score", "crawler_type", "classifier_type"]
+        
         for key, value in fields_dict.items():
-            if value not in [None, "", 0] or key in ["domain", "email", "website_url", "classification", "final_classification"]:
+            # Always include critical fields or non-empty values
+            if value not in [None, "", 0] or key in critical_fields:
                 flat_result[f"{prefix}_{key}"] = value
     
     # ========== DOMAIN INFO SECTION ==========
@@ -185,10 +193,22 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
     if other_info:
         add_section("09", "OTHER INFO", other_info)
     
-    # Filter out empty fields if desired
+    # Filter out empty fields, but ALWAYS keep critical fields
     filtered_result = {}
+    critical_field_suffixes = ["domain", "email", "website_url", "classification", 
+                              "final_classification", "confidence_score", 
+                              "crawler_type", "classifier_type"]
+    
     for key, value in flat_result.items():
-        if value not in [None, "", 0] or "section" in key or key.endswith("domain") or key.endswith("email") or key.endswith("website_url"):
+        if (value not in [None, "", 0] or 
+            "section" in key or 
+            any(key.endswith(f"_{suffix}") for suffix in critical_field_suffixes)):
             filtered_result[key] = value
+    
+    # Final debug check before returning
+    for suffix in critical_field_suffixes:
+        key = f"01_{suffix}"
+        if key not in filtered_result:
+            logger.warning(f"Critical field {key} is missing from filtered result!")
     
     return filtered_result
