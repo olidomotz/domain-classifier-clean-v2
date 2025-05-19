@@ -7,23 +7,35 @@ logger = logging.getLogger(__name__)
 
 def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Format the API response with numbered section markers to preserve order in PowerShell.
+    Format the API response for better PowerShell display and n8n access.
     
     Args:
         result: The original API response
         
     Returns:
-        dict: The reformatted API response with properly ordered sections
+        dict: The reformatted API response
     """
-    # Initialize empty result
-    formatted_result = {}
+    # For n8n, we want a flat structure with prefixed fields
+    flat_result = {}
+    
+    # ========== UTILITY FUNCTION ==========
+    def add_section(prefix, title, fields_dict):
+        """Add a section to the flat result with the given prefix and title."""
+        # Add section marker with the section number for ordering
+        section_key = f"{prefix}_section"
+        flat_result[section_key] = "=" * 20 + f" {title} " + "=" * 20
+        
+        # Add fields
+        for key, value in fields_dict.items():
+            if value not in [None, "", 0] or key in ["domain", "email", "website_url", "classification", "final_classification"]:
+                flat_result[f"{prefix}_{key}"] = value
     
     # ========== DOMAIN INFO SECTION ==========
-    formatted_result["_01_domain_info"] = "============ DOMAIN INFO ============"
-    
-    formatted_result["_01_domain"] = result.get("domain", "")
-    formatted_result["_01_email"] = result.get("email", "")
-    formatted_result["_01_website_url"] = result.get("website_url", "")
+    domain_info = {
+        "domain": result.get("domain", ""),
+        "email": result.get("email", ""),
+        "website_url": result.get("website_url", ""),
+    }
     
     # Add company name from either source
     company_name = result.get("company_name", "")
@@ -32,30 +44,32 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
     if not company_name and "ai_company_data" in result and isinstance(result["ai_company_data"], dict):
         company_name = result["ai_company_data"].get("name", "")
     
-    formatted_result["_01_company_name"] = company_name
+    domain_info["company_name"] = company_name
+    add_section("a", "DOMAIN INFO", domain_info)
     
     # ========== CLASSIFICATION SECTION ==========
-    formatted_result["_02_classification"] = "============ CLASSIFICATION ============"
-    
-    formatted_result["_02_class"] = result.get("predicted_class", "")
-    formatted_result["_02_final_classification"] = result.get("final_classification", "")
-    formatted_result["_02_confidence_score"] = result.get("confidence_score", 0)
-    formatted_result["_02_confidence_scores"] = result.get("confidence_scores", {})
-    formatted_result["_02_is_parked"] = result.get("is_parked", False)
-    formatted_result["_02_low_confidence"] = result.get("low_confidence", True)
-    formatted_result["_02_detection_method"] = result.get("detection_method", "")
-    formatted_result["_02_crawler_type"] = result.get("crawler_type", "")
-    formatted_result["_02_classifier_type"] = result.get("classifier_type", "")
-    formatted_result["_02_source"] = result.get("source", "")
-    formatted_result["_02_explanation"] = result.get("explanation", "")
+    classification_info = {
+        "classification": result.get("predicted_class", ""),
+        "final_classification": result.get("final_classification", ""),
+        "confidence_score": result.get("confidence_score", 0),
+        "confidence_scores": result.get("confidence_scores", {}),
+        "is_parked": result.get("is_parked", False),
+        "low_confidence": result.get("low_confidence", True),
+        "detection_method": result.get("detection_method", ""),
+        "crawler_type": result.get("crawler_type", ""),
+        "classifier_type": result.get("classifier_type", ""),
+        "source": result.get("source", ""),
+        "explanation": result.get("explanation", "")
+    }
+    add_section("b", "CLASSIFICATION", classification_info)
     
     # ========== AI DATA SECTION ==========
-    formatted_result["_03_ai_data"] = "============ AI DATA ============"
+    ai_info = {
+        "description": result.get("company_description", ""),
+        "one_liner": result.get("company_one_line", "")
+    }
     
-    formatted_result["_03_ai_description"] = result.get("company_description", "")
-    formatted_result["_03_ai_one_liner"] = result.get("company_one_line", "")
-    
-    # Add AI extracted structured data
+    # Add AI extracted data
     ai_data = result.get("ai_company_data", {})
     if isinstance(ai_data, str):
         try:
@@ -66,12 +80,14 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
             
     if ai_data and isinstance(ai_data, dict):
         for key, value in ai_data.items():
-            formatted_result[f"_03_ai_{key}"] = value
+            ai_info[key] = value
+    
+    add_section("c", "AI DATA", ai_info)
     
     # ========== APOLLO DATA SECTION ==========
-    formatted_result["_04_apollo_data"] = "============ APOLLO DATA ============"
-    
+    apollo_info = {}
     apollo_data = result.get("apollo_data", {})
+    
     if isinstance(apollo_data, str):
         try:
             import json
@@ -81,10 +97,12 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
             
     if apollo_data and isinstance(apollo_data, dict):
         for key, value in apollo_data.items():
-            formatted_result[f"_04_apollo_{key}"] = value
+            apollo_info[key] = value
+    
+    add_section("d", "APOLLO DATA", apollo_info)
     
     # ========== MERGED DATA SECTION ==========
-    formatted_result["_05_merged_data"] = "============ MERGED DATA ============"
+    merged_info = {}
     
     # Define fields to merge with priority
     fields_to_merge = [
@@ -109,38 +127,48 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
             
         # Only add non-empty values
         if value not in [None, "", 0]:
-            formatted_result[f"_05_merged_{field}"] = value
-            formatted_result[f"_05_merged_{field}_source"] = source
+            merged_info[field] = value
+            merged_info[f"{field}_source"] = source
+    
+    add_section("e", "MERGED DATA", merged_info)
     
     # ========== RECOMMENDATIONS SECTION ==========
-    formatted_result["_06_recommendations"] = "============ RECOMMENDATIONS ============"
-    
+    rec_info = {}
     recommendations = result.get("domotz_recommendations", {})
     if recommendations and isinstance(recommendations, dict):
-        formatted_result["_06_rec_primary_value"] = recommendations.get("primary_value", "")
-        formatted_result["_06_rec_recommended_plan"] = recommendations.get("recommended_plan", "")
-        formatted_result["_06_rec_use_cases"] = recommendations.get("use_cases", [])
+        rec_info["primary_value"] = recommendations.get("primary_value", "")
+        rec_info["recommended_plan"] = recommendations.get("recommended_plan", "")
+        rec_info["use_cases"] = recommendations.get("use_cases", [])
+    
+    add_section("f", "RECOMMENDATIONS", rec_info)
     
     # ========== ERROR HANDLING ==========
     if "error" in result:
-        formatted_result["_07_error"] = "============ ERROR ============"
-        formatted_result["_07_error_message"] = result["error"]
+        error_info = {
+            "error": result["error"]
+        }
         
-    if "error_type" in result:
-        formatted_result["_07_error_type"] = result["error_type"]
+        if "error_type" in result:
+            error_info["error_type"] = result["error_type"]
+            
+        if "error_detail" in result:
+            error_info["error_detail"] = result["error_detail"]
         
-    if "error_detail" in result:
-        formatted_result["_07_error_detail"] = result["error_detail"]
+        add_section("g", "ERROR", error_info)
     
     # Handle possible misclassification warnings
     if "possible_misclassification" in result and result["possible_misclassification"]:
-        formatted_result["_07_possible_misclassification"] = True
+        misclass_info = {
+            "possible_misclassification": True
+        }
         
         if "indicators_found" in result:
-            formatted_result["_07_indicators_found"] = result["indicators_found"]
+            misclass_info["indicators_found"] = result["indicators_found"]
             
         if "misclassification_warning" in result:
-            formatted_result["_07_misclassification_warning"] = result["misclassification_warning"]
+            misclass_info["misclassification_warning"] = result["misclassification_warning"]
+        
+        add_section("h", "MISCLASSIFICATION WARNING", misclass_info)
     
     # Ensure any other important fields from the original result are preserved
     important_fields = [
@@ -149,8 +177,12 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
         "is_timeout", "is_crawl_error", "bulk_process_id"
     ]
     
+    other_info = {}
     for field in important_fields:
         if field in result and result[field]:
-            formatted_result[f"_99_{field}"] = result[field]
+            other_info[field] = result[field]
     
-    return formatted_result
+    if other_info:
+        add_section("z", "OTHER INFO", other_info)
+    
+    return flat_result
