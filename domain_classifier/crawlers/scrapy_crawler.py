@@ -1,3 +1,4 @@
+
 """
 Enhanced Scrapy crawler implementation for domain classification.
 This module replaces the existing scrapy_crawler.py with improved capabilities for content extraction.
@@ -68,6 +69,9 @@ class RotatingUserAgentMiddleware:
         # Add Sec-CH-UA header to simulate modern browser
         request.headers['Sec-CH-UA'] = '"Google Chrome";v="115", "Chromium";v="115", "Not=A?Brand";v="24"'
         request.headers['Accept-Language'] = 'en-US,en;q=0.9'
+        # Add additional headers to improve redirect handling
+        request.headers['Accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+        request.headers['Referer'] = 'https://www.google.com/'
         return None
 
 
@@ -103,6 +107,45 @@ class SmartRetryMiddleware:
                     return self._handle_rate_limit(request, response, spider, retry_count)
                 else:  # Standard retry
                     return self._do_retry(request, response, spider, retry_count)
+        
+        # IMPROVED: Handle redirect-like behavior in non-30x responses
+        # Some sites use JavaScript or meta refresh instead of proper HTTP redirects
+        if response.status == 200:
+            # Check for meta refresh tags
+            meta_refresh = response.xpath('//meta[@http-equiv="refresh"]/@content').get()
+            if meta_refresh:
+                try:
+                    # Extract URL from meta refresh
+                    url_match = re.search(r'url=([^;]+)', meta_refresh, re.IGNORECASE)
+                    if url_match:
+                        redirect_url = url_match.group(1).strip()
+                        # Create a new request for the redirect URL
+                        logger.info(f"Following meta refresh redirect to {redirect_url}")
+                        new_request = request.replace(url=redirect_url)
+                        new_request.meta['redirect_times'] = request.meta.get('redirect_times', 0) + 1
+                        # Prevent redirect loops
+                        if new_request.meta['redirect_times'] <= 10:  # Set maximum redirects
+                            return new_request
+                except Exception as e:
+                    logger.warning(f"Error processing meta refresh: {e}")
+            
+            # Check for JavaScript redirects in the page content
+            js_redirect = response.xpath('//script[contains(text(), "window.location") or contains(text(), "document.location")]/text()').get()
+            if js_redirect:
+                try:
+                    # Extract URL from JavaScript redirect
+                    url_match = re.search(r'(?:window|document)\.location(?:\.href)?\s*=\s*[\'"]([^\'"]+)[\'"]', js_redirect)
+                    if url_match:
+                        redirect_url = url_match.group(1).strip()
+                        # Create a new request for the redirect URL
+                        logger.info(f"Following JavaScript redirect to {redirect_url}")
+                        new_request = request.replace(url=redirect_url)
+                        new_request.meta['redirect_times'] = request.meta.get('redirect_times', 0) + 1
+                        # Prevent redirect loops
+                        if new_request.meta['redirect_times'] <= 10:  # Set maximum redirects
+                            return new_request
+                except Exception as e:
+                    logger.warning(f"Error processing JavaScript redirect: {e}")
         
         return response
     
@@ -366,12 +409,25 @@ class JavaScriptMiddleware:
                     # Not critical, just log it
                     logger.debug(f"Could not handle cookie dialog: {e}")
                 
+                # IMPROVED: Check for and handle redirects
+                try:
+                    current_url = self.selenium_driver.current_url
+                    if current_url != url:
+                        logger.info(f"Selenium detected redirect from {url} to {current_url}")
+                        # Check if the redirect is to a different domain
+                        original_domain = urlparse(url).netloc
+                        new_domain = urlparse(current_url).netloc
+                        if original_domain != new_domain:
+                            logger.info(f"Redirect changed domain from {original_domain} to {new_domain}")
+                except Exception as e:
+                    logger.warning(f"Error checking for Selenium redirects: {e}")
+                
                 # Get the rendered HTML
                 body = self.selenium_driver.page_source
                 
                 # Return the HTML response
                 return HtmlResponse(
-                    url=url,
+                    url=self.selenium_driver.current_url,  # Use CURRENT URL to handle redirects
                     body=body.encode('utf-8'),
                     encoding='utf-8',
                     request=request
@@ -391,13 +447,14 @@ class EnhancedScrapySpider(scrapy.Spider):
     
     name = "enhanced_domain_spider"
     
-    # IMPROVED SETTINGS for better reliability
+    # IMPROVED SETTINGS for better reliability and redirect handling
     custom_settings = {
         'DOWNLOAD_TIMEOUT': 60,  # INCREASED from 40
         'RETRY_TIMES': 4,        # INCREASED from 3
         'RETRY_HTTP_CODES': [500, 502, 503, 504, 408, 429, 403],  # Added 403
         'COOKIES_ENABLED': True,  # Enable cookies for session-based sites
-        'REDIRECT_MAX_TIMES': 10, # INCREASED from 8
+        'REDIRECT_MAX_TIMES': 15, # INCREASED from 10 to handle more redirects
+        'REDIRECT_ENABLED': True, # Explicitly enable redirects
         'DOWNLOAD_DELAY': 0.5,  # Small delay to reduce blocking
         'HTTPERROR_ALLOW_ALL': True,  # Process pages that return errors
         'ROBOTSTXT_OBEY': False,  # Skip robots.txt check for better success rate
@@ -407,13 +464,17 @@ class EnhancedScrapySpider(scrapy.Spider):
             'domain_classifier.crawlers.scrapy_crawler.RotatingUserAgentMiddleware': 400,
             'domain_classifier.crawlers.scrapy_crawler.SmartRetryMiddleware': 550,
             'domain_classifier.crawlers.scrapy_crawler.JavaScriptMiddleware': 600,
+            'scrapy.downloadermiddlewares.redirect.RedirectMiddleware': 610,  # Override to enable redirects
         },
         # NEW SETTINGS for better stability
         'CONCURRENT_REQUESTS': 4,  # Limit concurrent requests 
         'DOWNLOAD_MAXSIZE': 10485760,  # 10MB max download
         'REACTOR_THREADPOOL_MAXSIZE': 20,  # More threads
         'AJAXCRAWL_ENABLED': True,  # Better AJAX handling
-        'LOG_LEVEL': 'INFO'  # More detailed logging
+        'LOG_LEVEL': 'INFO',  # More detailed logging
+        # Enhanced redirect handling
+        'REDIRECT_PRIORITY_ADJUST': 2,  # Give redirects a higher priority
+        'METAREFRESH_ENABLED': True,   # Enable META refresh redirects
     }
     
     def __init__(self, url):
@@ -426,6 +487,8 @@ class EnhancedScrapySpider(scrapy.Spider):
         self.content_fragments = []
         self.js_required = self._check_if_js_required(url)
         self.found_content = False
+        # Track redirects
+        self.redirect_history = []
     
     def _check_if_js_required(self, url):
         """Check if the domain likely requires JavaScript."""
@@ -479,22 +542,30 @@ class EnhancedScrapySpider(scrapy.Spider):
                         'js_render': True,
                         'domain_type': 'js_heavy',
                         'dont_redirect': False,
-                        'handle_httpstatus_list': [403, 404, 500]
+                        'handle_httpstatus_list': [403, 404, 500],
+                        'redirect_times': 0  # Initialize redirect counter
                     }
                 )
             else:
-                # Standard request for most domains
+                # Standard request for most domains with enhanced redirect handling
                 yield scrapy.Request(
                     url, 
                     callback=self.parse,
                     meta={
-                        'dont_redirect': False,
-                        'handle_httpstatus_list': [403, 404, 500]
+                        'dont_redirect': False,  # Allow redirects
+                        'handle_httpstatus_list': [403, 404, 500],
+                        'redirect_times': 0,     # Initialize redirect counter
+                        'download_timeout': 60   # Longer timeout for redirects
                     }
                 )
     
     def parse(self, response):
         """Parse response with improved content extraction."""
+        # Track redirects
+        if response.request.meta.get('redirect_urls'):
+            self.redirect_history.extend(response.request.meta['redirect_urls'])
+            logger.info(f"Followed redirects: {' -> '.join(response.request.meta['redirect_urls'])} -> {response.url}")
+            
         # Skip non-HTML responses
         if not hasattr(response, 'text'):
             return 
@@ -522,15 +593,16 @@ class EnhancedScrapySpider(scrapy.Spider):
         url_info = {
             'url': response.url,
             'content': content,
-            'is_homepage': response.url == self.original_url,
-            'raw_html': response.text[:50000] if len(content) < 30 else None  # Store raw HTML if extraction failed
+            'is_homepage': response.url == self.original_url or response.url in self.redirect_history,
+            'raw_html': response.text[:50000] if len(content) < 30 else None,  # Store raw HTML if extraction failed
+            'redirected_from': self.redirect_history if self.redirect_history else None  # Add redirect information
         }
         
         # Add content to our collection
         self.content_fragments.append(url_info)
         
         # Only follow links from homepage to avoid crawling too much
-        if response.url == self.original_url:
+        if response.url == self.original_url or response.url in self.redirect_history:
             # Extract and follow important links
             yield from self._follow_important_links(response)
     
@@ -714,11 +786,19 @@ class EnhancedScrapySpider(scrapy.Spider):
                     meta={
                         'js_render': True,
                         'domain_type': 'js_heavy',
-                        'dont_redirect': False
+                        'dont_redirect': False,
+                        'redirect_times': 0  # Start fresh redirect counter
                     }
                 )
             else:
-                yield scrapy.Request(link, callback=self.parse)
+                yield scrapy.Request(
+                    link, 
+                    callback=self.parse,
+                    meta={
+                        'dont_redirect': False,  # Allow redirects
+                        'redirect_times': 0      # Start fresh redirect counter
+                    }
+                )
     
     def closed(self, reason):
         """Called when spider closes."""
@@ -753,6 +833,10 @@ class EnhancedScrapyCrawler:
             'DOWNLOAD_TIMEOUT': 60,  # INCREASED from 40
             'USER_AGENT': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
             'DOWNLOADER_CLIENTCONTEXTFACTORY': 'scrapy.core.downloader.contextfactory.BrowserLikeContextFactory',
+            # Improved redirect handling
+            'REDIRECT_ENABLED': True,  # Explicitly enable redirects
+            'REDIRECT_MAX_TIMES': 15,  # INCREASED from 10
+            'METAREFRESH_ENABLED': True, # Enable meta refresh redirects
             # NEW SETTINGS for better stability
             'CONCURRENT_REQUESTS': 4,
             'DOWNLOAD_MAXSIZE': 10485760,  # 10MB
@@ -770,6 +854,9 @@ class EnhancedScrapyCrawler:
         content = item.get('content', '')
         if content:
             logger.info(f"Added content to results: {len(content)} characters")
+        # Log redirect info if available
+        if item.get('redirected_from'):
+            logger.info(f"Item was redirected from: {' -> '.join(item['redirected_from'])}")
 
     @crochet.wait_for(timeout=45.0)  # INCREASED from 30 to allow more time for JS rendering
     def _run_spider(self, url):
@@ -781,124 +868,69 @@ class EnhancedScrapyCrawler:
         self.results.clear()
         try:
             logger.info(f"Starting enhanced Scrapy crawl for {url}")
-            self._run_spider(url)
             
-            # Debug the results
-            if not self.results:
-                logger.warning(f"No results returned by spider for {url}")
-                # Try direct crawl as a last resort
+            # Parse the domain for parked domain checking later
+            domain = urlparse(url).netloc
+            if domain.startswith('www.'):
+                domain = domain[4:]
+            
+            # Create crawler instance and scrape
+            crawler = EnhancedScrapyCrawler()
+            content = crawler.scrape(url)
+            
+            # Log the content length for better diagnostics
+            content_length = len(content) if content else 0
+            logger.info(f"Scrapy crawl for {domain} returned {content_length} characters")
+            
+            # Check for parked domain indicators in content before proceeding
+            if content:
+                from domain_classifier.classifiers.decision_tree import is_parked_domain
+                if is_parked_domain(content, domain):
+                    logger.info(f"Detected parked domain from enhanced Scrapy content: {domain}")
+                    return None, ("is_parked", "Domain appears to be parked based on content analysis")
+                    
+                # Check for proxy errors or hosting provider mentions that indicate parked domains
+                if len(content.strip()) < 300 and any(phrase in content.lower() for phrase in 
+                                                   ["proxy error", "error connecting", "godaddy", 
+                                                    "domain registration", "hosting provider", "buy this domain"]):
+                    logger.info(f"Domain {domain} appears to be parked based on proxy errors or hosting mentions")
+                    return None, ("is_parked", "Domain appears to be parked with a domain registrar")
+            
+            # CRITICAL FIX: Return content even if it's minimal - Apify fallback will handle cases where truly needed
+            if content:
+                # Any content is better than falling back to Apify which takes a very long time
+                logger.info(f"Enhanced Scrapy crawl successful, got {len(content)} characters")
+                return content, (None, None)
+            else:
+                # No content at all
+                logger.warning(f"Enhanced Scrapy crawl returned no content for {domain}")
+                
+                # Try a direct crawl as backup to check for parked domain
                 try:
                     from domain_classifier.crawlers.direct_crawler import direct_crawl
                     direct_content, _, _ = direct_crawl(url, timeout=5.0)
-                    if direct_content and len(direct_content) > 100:
-                        logger.info(f"Using direct crawl content: {len(direct_content)} characters")
-                        return direct_content
-                except Exception as direct_err:
-                    logger.error(f"Error in direct crawl fallback: {direct_err}")
-                return None
-            else:
-                logger.info(f"Processing {len(self.results)} results from Scrapy")
-            
-            # Process results
-            all_content = []
-            has_raw_html = False
-            raw_html = None
-            
-            # First collect all content items
-            for item in self.results:
-                content = item.get('content', '')
-                if content and len(content.strip()) > 30:
-                    all_content.append(content)
-                # Also check for raw HTML if content is minimal
-                if item.get('raw_html') and not has_raw_html:
-                    has_raw_html = True
-                    raw_html = item.get('raw_html')
-            
-            # First process the homepage content (most important)
-            homepage_content = None
-            for item in self.results:
-                if item.get('is_homepage', False):
-                    homepage_content = item.get('content', '')
-                    if item.get('raw_html'):
-                        has_raw_html = True
-                        raw_html = item.get('raw_html')
-                    break
-
-            # If homepage has meaningful content, add it first
-            if homepage_content and len(homepage_content.strip()) > 30:
-                all_content.append(homepage_content)
-            
-            # Then add other page content - focus on sorting by length to get most content-rich pages
-            other_content = []
-            for item in self.results:
-                if not item.get('is_homepage', False) and item.get('content'):
-                    other_content.append(item.get('content', ''))
-
-            # Sort other content by length (longest first) to prioritize content-rich pages
-            other_content.sort(key=lambda x: len(x), reverse=True)
-            
-            # Add top 5 other pages with most content
-            for content in other_content[:5]:
-                if len(content) > 30:  # Only add meaningful content
-                    all_content.append(content)
-            
-            # If we have any content, return it combined
-            if all_content:
-                combined_text = ' '.join(all_content)
-                combined_text = re.sub(r'\s+', ' ', combined_text).strip()
-                logger.info(f"Combined {len(all_content)} content items, total {len(combined_text)} characters")
-                return combined_text
-            
-            # Critical Fix 1: Look for content directly from the results if combined text is empty
-            if not all_content and self.results:
-                logger.info("No combined text, trying alternate extraction")
-                
-                # Approach 1: Try to get the longest content item directly
-                content_items = [(item.get('content', ''), len(item.get('content', ''))) for item in self.results 
-                               if item.get('content') and len(item.get('content', '').strip()) > 0]
-                
-                # Sort by content length
-                content_items.sort(key=lambda x: x[1], reverse=True)
-                
-                if content_items:
-                    # Get the longest content item
-                    longest_content, length = content_items[0]
-                    logger.info(f"Using longest content item directly: {length} characters")
-                    return longest_content
-            
-            # Critical Fix 2: Look at the first item directly if we're still empty
-            if not all_content and self.results and len(self.results) > 0:
-                first_item = self.results[0]
-                content = first_item.get('content', '')
-                if content:
-                    logger.info(f"Using first result content directly: {len(content)} characters")
-                    return content
-            
-            # If we have raw HTML, use that as a last resort
-            if has_raw_html and raw_html:
-                # Try to extract text from raw HTML
-                try:
-                    # Basic HTML cleaning
-                    clean_html = re.sub(r'<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>', ' ', raw_html, flags=re.DOTALL)
-                    clean_html = re.sub(r'<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>', ' ', clean_html, flags=re.DOTALL)
-                    clean_html = re.sub(r'<[^>]+>', ' ', clean_html)
-                    clean_html = re.sub(r'\s+', ' ', clean_html).strip()
                     
-                    logger.warning(f"Using raw HTML as last resort: {len(clean_html)} characters")
-                    return clean_html
-                except Exception as html_err:
-                    logger.error(f"Error cleaning raw HTML: {html_err}")
-                    # Return the raw HTML anyway
-                    return raw_html
+                    # Check the direct content for parked domain indicators
+                    if direct_content:
+                        from domain_classifier.classifiers.decision_tree import is_parked_domain
+                        if is_parked_domain(direct_content, domain):
+                            logger.info(f"Detected parked domain from direct content: {domain}")
+                            return None, ("is_parked", "Domain appears to be parked based on content analysis")
+                        
+                        # If direct crawl got content, return it instead of falling back to Apify
+                        if len(direct_content) > 100:
+                            logger.info(f"Direct crawl succeeded with {len(direct_content)} characters")
+                            return direct_content, (None, None)
+                except Exception as direct_err:
+                    logger.warning(f"Direct crawl failed for parked check: {direct_err}")
                 
-            # No usable content found
-            logger.warning(f"No usable content found in Scrapy results for {url}")
-            return None
+                return None, ("minimal_content", "Website returned minimal or no content")
                 
         except Exception as e:
-            logger.error(f"Error in Enhanced Scrapy crawler: {e}")
-            logger.error(traceback.format_exc())
-            return None
+            from domain_classifier.crawlers.apify_crawler import detect_error_type
+            error_type, error_detail = detect_error_type(str(e))
+            logger.error(f"Error in Enhanced Scrapy crawler: {e} (Type: {error_type})")
+            return None, (error_type, error_detail)
 
 
 def scrapy_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]]]:
@@ -969,6 +1001,7 @@ def scrapy_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional
                     if len(direct_content) > 100:
                         logger.info(f"Direct crawl succeeded with {len(direct_content)} characters")
                         return direct_content, (None, None)
+                    
             except Exception as direct_err:
                 logger.warning(f"Direct crawl failed for parked check: {direct_err}")
             
