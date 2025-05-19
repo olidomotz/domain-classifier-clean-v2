@@ -1,3 +1,4 @@
+"""Fallback classifier for domain classification."""
 import logging
 import re
 from typing import Dict, Any
@@ -8,6 +9,7 @@ logger = logging.getLogger(__name__)
 # Define indicators for different company types
 # These are used for keyword-based classification
 MSP_INDICATORS = [
+    # Original indicators
     "managed service", "it service", "it support", "it consulting", "tech support",
     "technical support", "network", "server", "cloud", "infrastructure", "monitoring",
     "helpdesk", "help desk", "cyber", "security", "backup", "disaster recovery",
@@ -18,7 +20,19 @@ MSP_INDICATORS = [
     "unifi", "ubiquiti", "networking", "uisp", "omada", "network management", 
     "cloud deployment", "cloud management", "network infrastructure",
     "wifi management", "wifi deployment", "network controller",
-    "hosting", "hostifi", "managed hosting", "cloud hosting"
+    "hosting", "hostifi", "managed hosting", "cloud hosting",
+    
+    # New cybersecurity indicators
+    "cyber security", "cybersecurity", "information security", "network security",
+    "security services", "security solutions", "managed security", "vulnerability assessment",
+    "penetration testing", "pen testing", "security monitoring", "threat detection", 
+    "incident response", "security operations", "soc", "security operations center", 
+    "mssp", "managed security service provider", "data protection", "digital security", 
+    "cyber risk", "security consulting", "zero trust", "endpoint protection",
+    "threat intelligence", "security awareness", "compliance", "audit",
+    "risk assessment", "data breach", "ransomware", "malware", "phishing", 
+    "firewall", "intrusion detection", "intrusion prevention", "security audit",
+    "zero-day", "vulnerability scanning", "ethical hacking", "ddos", "web application security"
 ]
 
 COMMERCIAL_AV_INDICATORS = [
@@ -131,6 +145,10 @@ def parse_free_text(text: str, domain: str = None) -> Dict[str, Any]:
             (r"residential a\/?v|residential integrator", "Integrator - Residential A/V")
         ]
         
+        # Add specific cybersecurity detection
+        security_pattern = (r"cybersecurity|cyber security|security provider|security firm|security company", "Managed Service Provider")
+        class_patterns.insert(0, security_pattern)  # Give security detection priority
+        
         predicted_class = None
         for pattern, class_name in class_patterns:
             if re.search(pattern, text_lower):
@@ -140,8 +158,13 @@ def parse_free_text(text: str, domain: str = None) -> Dict[str, Any]:
                 
         # Default if no clear match
         if not predicted_class:
-            predicted_class = "Managed Service Provider"  # Most common fallback
-            logger.warning(f"No clear service type found, defaulting to MSP")
+            # Check if this could be a security company from the domain
+            if domain and any(term in domain.lower() for term in ['cyber', 'security', 'secure', 'protect']):
+                predicted_class = "Managed Service Provider"
+                logger.info(f"Defaulted to MSP due to security terms in domain: {domain}")
+            else:
+                predicted_class = "Managed Service Provider"  # Most common fallback
+                logger.warning(f"No clear service type found, defaulting to MSP")
     else:
         predicted_class = "Internal IT Department"
         
@@ -182,6 +205,14 @@ def parse_free_text(text: str, domain: str = None) -> Dict[str, Any]:
         commercial_score = sum(1 for keyword in COMMERCIAL_AV_INDICATORS if keyword in text_lower)
         residential_score = sum(1 for keyword in RESIDENTIAL_AV_INDICATORS if keyword in text_lower)
         
+        # Check for specific cybersecurity terms - give them extra weight
+        security_terms = [
+            "cybersecurity", "cyber security", "security services", "security provider", 
+            "managed security", "security operations", "security monitoring"
+        ]
+        security_count = sum(2 for term in security_terms if term in text_lower)  # Double weight
+        msp_score += security_count
+        
         total_score = max(1, msp_score + commercial_score + residential_score)
         
         # Calculate proportional scores
@@ -189,6 +220,10 @@ def parse_free_text(text: str, domain: str = None) -> Dict[str, Any]:
         comm_conf = 0.30 + (0.5 * commercial_score / total_score) if commercial_score > 0 else 0.08
         resi_conf = 0.30 + (0.5 * residential_score / total_score) if residential_score > 0 else 0.08
         
+        # If security terms were found, boost MSP confidence
+        if security_count > 0:
+            msp_conf = max(0.7, msp_conf)  # At least 70% confidence if security terms found
+            
         confidence_scores = {
             "Managed Service Provider": int(msp_conf * 100),
             "Integrator - Commercial A/V": int(comm_conf * 100),
@@ -218,6 +253,10 @@ def parse_free_text(text: str, domain: str = None) -> Dict[str, Any]:
     # Generate company description
     from domain_classifier.utils.text_processing import extract_company_description
     company_description = extract_company_description(text, explanation, domain)
+
+    # Generate one-line description
+    from domain_classifier.utils.text_processing import generate_one_line_description
+    one_line_description = generate_one_line_description(text, predicted_class, domain, company_description)
         
     # Calculate max confidence
     if is_service and predicted_class in confidence_scores:
@@ -233,6 +272,7 @@ def parse_free_text(text: str, domain: str = None) -> Dict[str, Any]:
         "confidence_scores": confidence_scores,
         "llm_explanation": explanation,
         "company_description": company_description,
+        "company_one_line": one_line_description,
         "detection_method": "text_parsing",
         "low_confidence": is_service and max_confidence < 0.4,
         "max_confidence": max_confidence
@@ -290,6 +330,10 @@ def create_non_service_result(domain: str, text_content: str) -> Dict[str, Any]:
     else:
         explanation = f"{domain or 'This company'} does not appear to be a service business in the IT or A/V integration space. There is no evidence that it provides managed services, IT support, or audio/visual integration to clients. Rather, it appears to be a company that might have its own internal IT needs (estimated potential: {internal_it_potential}/100)."
         company_description = f"{domain or 'This company'} appears to be a business entity that doesn't provide IT or A/V services to clients."
+
+    # Generate one-line description
+    from domain_classifier.utils.text_processing import generate_one_line_description
+    one_line_description = generate_one_line_description(text_content, "Internal IT Department", domain, company_description)
         
     # Create Internal IT Department result with minimal confidence scores for service categories
     return {
@@ -305,6 +349,7 @@ def create_non_service_result(domain: str, text_content: str) -> Dict[str, Any]:
         },
         "llm_explanation": explanation,
         "company_description": company_description,
+        "company_one_line": one_line_description,
         "detection_method": "non_service_detection",
         "low_confidence": True,
         "max_confidence": 0.8  # Reasonably confident in non-service classification
@@ -323,14 +368,86 @@ def fallback_classification(text_content: str, domain: str = None) -> Dict[str, 
     """
     logger.info("Using fallback classification method")
     
+    # First check for cybersecurity companies using domain name
+    if domain:
+        domain_lower = domain.lower()
+        security_terms = ['cyber', 'security', 'secure', 'protect', 'defense']
+        
+        if any(term in domain_lower for term in security_terms):
+            # Check for security terms in content too
+            security_content_terms = [
+                'cyber security', 'cybersecurity', 'information security', 'network security',
+                'security services', 'security solutions', 'managed security', 'vulnerability',
+                'penetration testing', 'security monitoring', 'threat', 'attack', 'malware',
+                'ransomware', 'firewall', 'intrusion', 'data breach', 'risk assessment',
+                'threat intelligence', 'cyber threat', 'security posture'
+            ]
+            
+            security_term_count = 0
+            if text_content:
+                text_lower = text_content.lower()
+                security_term_count = sum(1 for term in security_content_terms if term in text_lower)
+            
+            # If domain contains security term and content has at least one security term,
+            # or domain has multiple security terms
+            security_domain_terms = sum(1 for term in security_terms if term in domain_lower)
+            if (security_domain_terms >= 1 and security_term_count >= 1) or security_domain_terms >= 2:
+                logger.info(f"Domain {domain} detected as security company via domain and content indicators")
+                
+                # Create a specialized security MSP result
+                explanation = (
+                    f"Based on analysis of the domain name and website content, {domain} appears to be a "
+                    f"cybersecurity company that provides security services and solutions to protect "
+                    f"organizations from cyber threats. This type of company is classified as a Managed "
+                    f"Service Provider specializing in security services."
+                )
+                
+                company_description = (
+                    f"{domain} is a cybersecurity company providing managed security services "
+                    f"and solutions to protect organizations from cyber threats."
+                )
+                
+                from domain_classifier.utils.text_processing import generate_one_line_description
+                one_line = f"{domain} provides managed cybersecurity services."
+                
+                return {
+                    "processing_status": 2,  # Success
+                    "is_service_business": True,
+                    "predicted_class": "Managed Service Provider",
+                    "internal_it_potential": 0,
+                    "confidence_scores": {
+                        "Managed Service Provider": 85,
+                        "Integrator - Commercial A/V": 8,
+                        "Integrator - Residential A/V": 5,
+                        "Internal IT Department": 0
+                    },
+                    "llm_explanation": explanation,
+                    "company_description": company_description,
+                    "company_one_line": one_line,
+                    "detection_method": "security_domain_detection",
+                    "low_confidence": False,
+                    "max_confidence": 0.85
+                }
+    
     # First determine if it's likely a service business
-    text_lower = text_content.lower()
+    text_lower = text_content.lower() if text_content else ""
     
     # Count service-related terms
     service_count = sum(1 for term in SERVICE_BUSINESS_INDICATORS if term in text_lower)
     
+    # Count security-related terms
+    security_terms = [
+        "cybersecurity", "cyber security", "information security", "network security",
+        "security services", "managed security", "security operations", "vulnerability",
+        "security company", "security provider", "penetration testing", "security assessment"
+    ]
+    security_count = sum(1 for term in security_terms if term in text_lower)
+    
     # Is this likely a service business?
     is_service = service_count >= 2
+    
+    # Is this likely a security company?
+    is_security_company = security_count >= 2
     
     if domain:
         domain_lower = domain.lower()
@@ -338,6 +455,13 @@ def fallback_classification(text_content: str, domain: str = None) -> Dict[str, 
         if any(term in domain_lower for term in ["service", "tech", "it", "consult", "support", "solutions"]):
             is_service = True
             logger.info(f"Domain name indicates service business: {domain}")
+        
+        # Domain name hints for security company
+        if any(term in domain_lower for term in ['cyber', 'security', 'secure', 'protect', 'defense']):
+            if is_service or security_count >= 1:
+                is_security_company = True
+                is_service = True
+                logger.info(f"Domain name indicates security company: {domain}")
             
         # Special case for travel/vacation domains
         vacation_terms = ["vacation", "holiday", "rental", "booking", "hotel", "travel"]
@@ -353,7 +477,45 @@ def fallback_classification(text_content: str, domain: str = None) -> Dict[str, 
     
     logger.info(f"Fallback classification service business determination: {is_service}")
     
-    if is_service:
+    # Special handling for security companies
+    if is_security_company:
+        logger.info(f"Detected security company during fallback classification")
+        
+        # Create a specialized security MSP result
+        explanation = (
+            f"Based on analysis of the website content, {domain} appears to be a "
+            f"cybersecurity company providing security services and solutions to protect "
+            f"organizations from cyber threats. This type of company is classified as a Managed "
+            f"Service Provider specializing in security services."
+        )
+        
+        company_description = (
+            f"{domain} is a cybersecurity company providing managed security services "
+            f"and solutions to protect organizations from cyber threats."
+        )
+        
+        from domain_classifier.utils.text_processing import generate_one_line_description
+        one_line = f"{domain} provides managed cybersecurity services."
+        
+        return {
+            "processing_status": 2,  # Success
+            "is_service_business": True,
+            "predicted_class": "Managed Service Provider",
+            "internal_it_potential": 0,
+            "confidence_scores": {
+                "Managed Service Provider": 85,
+                "Integrator - Commercial A/V": 8,
+                "Integrator - Residential A/V": 5,
+                "Internal IT Department": 0
+            },
+            "llm_explanation": explanation,
+            "company_description": company_description,
+            "company_one_line": one_line,
+            "detection_method": "security_company_detection",
+            "low_confidence": False,
+            "max_confidence": 0.85
+        }
+    elif is_service:
         # Start with default confidence scores
         confidence = {
             "Managed Service Provider": 0.35,
@@ -450,6 +612,10 @@ def fallback_classification(text_content: str, domain: str = None) -> Dict[str, 
         from domain_classifier.utils.text_processing import extract_keywords_company_description
         company_description = extract_keywords_company_description(text_content, predicted_class, domain)
         
+        # Generate one-line description
+        from domain_classifier.utils.text_processing import generate_one_line_description
+        one_line_description = generate_one_line_description(text_content, predicted_class, domain, company_description)
+        
         # Convert decimal confidence to 1-100 range
         confidence_scores = {k: int(v * 100) for k, v in confidence.items()}
         
@@ -464,6 +630,7 @@ def fallback_classification(text_content: str, domain: str = None) -> Dict[str, 
             "confidence_scores": confidence_scores,
             "llm_explanation": explanation,
             "company_description": company_description,
+            "company_one_line": one_line_description,
             "detection_method": "fallback",
             "low_confidence": True,
             "max_confidence": confidence_scores[predicted_class] / 100.0
