@@ -20,6 +20,9 @@ from domain_classifier.storage.cache_manager import process_cached_result
 from domain_classifier.utils.text_processing import extract_company_description
 from domain_classifier.storage.result_processor import process_fresh_result
 
+# Import the new API formatter
+from domain_classifier.utils.api_formatter import format_api_response
+
 # Set up logging
 logger = logging.getLogger(__name__)
 
@@ -98,6 +101,9 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
             
             # New option to control vector classification
             use_vector_classification = data.get('use_vector_classification', True)
+
+            # New option to control response format
+            use_new_format = data.get('use_new_format', True)
             
             if not input_value:
                 return jsonify({"error": "URL or email is required"}), 400
@@ -161,7 +167,12 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                 
                 # Return the override directly
                 logger.info(f"Sending override response to client: {domain_override}")
-                return jsonify(domain_override), 200
+                
+                # Format the response if requested
+                if use_new_format:
+                    return jsonify(format_api_response(domain_override)), 200
+                else:
+                    return jsonify(domain_override), 200
             
             # Enhanced domain screening before attempting crawl
             worth_crawling, has_dns, dns_error, potentially_flaky = is_domain_worth_crawling(domain)
@@ -176,7 +187,12 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                 result = process_fresh_result(parked_result, domain, email, url)
                 result["crawler_type"] = "dns_check_parked"
                 result["classifier_type"] = "early_detection"
-                return jsonify(result), 200
+                
+                # Format the response if requested
+                if use_new_format:
+                    return jsonify(format_api_response(result)), 200
+                else:
+                    return jsonify(result), 200
             
             if not worth_crawling:
                 logger.warning(f"Domain {domain} is not worth crawling: {dns_error}")
@@ -184,7 +200,12 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                                                  dns_error, email, crawler_type)
                 error_result["website_url"] = url
                 error_result["final_classification"] = "7-No Website available"
-                return jsonify(error_result), 503  # Service Unavailable
+                
+                # Format the response if requested
+                if use_new_format:
+                    return jsonify(format_api_response(error_result)), 503  # Service Unavailable
+                else:
+                    return jsonify(error_result), 503  # Service Unavailable
             
             # If domain is worth crawling, do an additional early check for parked domains
             if worth_crawling:
@@ -202,7 +223,11 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                     result["crawler_type"] = "quick_check_parked"  
                     result["classifier_type"] = "early_detection"
                     
-                    return jsonify(result), 200
+                    # Format the response if requested
+                    if use_new_format:
+                        return jsonify(format_api_response(result)), 200
+                    else:
+                        return jsonify(result), 200
             
             if potentially_flaky:
                 logger.warning(f"Domain {domain} passed basic checks but shows signs of being flaky (resetting connections)")
@@ -226,7 +251,11 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                     # Log the response for debugging
                     logger.info(f"Sending cached response to client")
                     
-                    return jsonify(result), 200
+                    # Format the response if requested
+                    if use_new_format:
+                        return jsonify(format_api_response(result)), 200
+                    else:
+                        return jsonify(result), 200
             
             # Try to get content (either from DB or by crawling)
             content = None
@@ -254,7 +283,11 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                             result["crawler_type"] = "cached_content_parked"
                             result["classifier_type"] = "early_detection"
                             
-                            return jsonify(result), 200
+                            # Format the response if requested
+                            if use_new_format:
+                                return jsonify(format_api_response(result)), 200
+                            else:
+                                return jsonify(result), 200
                 except Exception as e:
                     logger.warning(f"Could not get existing content, will crawl instead: {e}")
                     content = None
@@ -285,7 +318,11 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                 if email:
                     error_result["email"] = email
                     
-                return jsonify(error_result), 404
+                # Format the response if requested
+                if use_new_format:
+                    return jsonify(format_api_response(error_result)), 404
+                else:
+                    return jsonify(error_result), 404
             
             # If no content yet and we're not using existing content, crawl the website
             error_type = None
@@ -299,7 +336,11 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                     error_result = create_error_result(domain, error_type, error_detail, email, crawler_type)
                     error_result["website_url"] = url
                     
-                    return jsonify(error_result), 503  # Service Unavailable
+                    # Format the response if requested
+                    if use_new_format:
+                        return jsonify(format_api_response(error_result)), 503  # Service Unavailable
+                    else:
+                        return jsonify(error_result), 503  # Service Unavailable
             
             # Classify the content
             if not llm_classifier:
@@ -326,7 +367,11 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                 if email:
                     error_result["email"] = email
                     
-                return jsonify(error_result), 500
+                # Format the response if requested
+                if use_new_format:
+                    return jsonify(format_api_response(error_result)), 500
+                else:
+                    return jsonify(error_result), 500
                 
             logger.info(f"Classifying content for {domain}")
             classification = llm_classifier.classify(
@@ -359,7 +404,11 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                 if email:
                     error_result["email"] = email
                     
-                return jsonify(error_result), 500
+                # Format the response if requested
+                if use_new_format:
+                    return jsonify(format_api_response(error_result)), 500
+                else:
+                    return jsonify(error_result), 500
             
             # Add crawler_type to the classification if available
             if crawler_type:
@@ -401,7 +450,12 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
             # Log the response for debugging
             logger.info(f"Sending fresh response to client")
             
-            return jsonify(result), 200
+            # Format the response if requested
+            if use_new_format:
+                formatted_result = format_api_response(result)
+                return jsonify(formatted_result), 200
+            else:
+                return jsonify(result), 200
             
         except Exception as e:
             logger.error(f"Error processing request: {e}\n{traceback.format_exc()}")
@@ -417,7 +471,13 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
             error_result["error"] = str(e)  # Add the actual error message
             if 'url' in locals():
                 error_result["website_url"] = url
-            return jsonify(error_result), 500
+                
+            # Format the response if requested
+            use_new_format = data.get('use_new_format', True) if 'data' in locals() else True
+            if use_new_format:
+                return jsonify(format_api_response(error_result)), 500
+            else:
+                return jsonify(error_result), 500
     
     @app.route('/classify-email', methods=['POST', 'OPTIONS'])
     def classify_email():
@@ -438,7 +498,8 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                 'url': email,
                 'force_reclassify': data.get('force_reclassify', False),
                 'use_existing_content': data.get('use_existing_content', False),
-                'use_vector_classification': data.get('use_vector_classification', True)  # Add vector flag
+                'use_vector_classification': data.get('use_vector_classification', True),  # Add vector flag
+                'use_new_format': data.get('use_new_format', True)  # Add format flag
             }
             
             # Forward to classify_domain by calling it directly with the new data
@@ -474,6 +535,12 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
             error_type, error_detail = detect_error_type(str(e))
             error_result = create_error_result("unknown", error_type, error_detail, None, "email_handler")
             error_result["error"] = str(e)
-            return jsonify(error_result), 500
+            
+            # Format the response
+            use_new_format = data.get('use_new_format', True) if 'data' in locals() else True
+            if use_new_format:
+                return jsonify(format_api_response(error_result)), 500
+            else:
+                return jsonify(error_result), 500
             
     return app
