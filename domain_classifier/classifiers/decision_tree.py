@@ -145,7 +145,73 @@ def check_special_domain_cases(domain: str, text_content: str) -> Optional[Dict[
         Optional[Dict[str, Any]]: Custom result if special case, None otherwise
     """
     domain_lower = domain.lower()
+    content_lower = text_content.lower() if text_content else ""
     
+    # Check for security-focused domains
+    security_domain_indicators = ['cyber', 'security', 'secure', 'protect', 'defense', 'infosec', 'threat']
+    security_content_indicators = [
+        'cyber security', 'cybersecurity', 'information security', 'network security',
+        'security services', 'security solutions', 'managed security', 'vulnerability',
+        'penetration testing', 'security monitoring', 'threat', 'attack', 'malware',
+        'ransomware', 'firewall', 'intrusion', 'data breach', 'risk assessment',
+        'security operations', 'soc', 'security operations center', 'mssp',
+        'managed security service provider', 'security awareness',
+        'incident response', 'threat intelligence', 'endpoint protection',
+        'zero trust', 'compliance', 'audit', 'protection', 'defend'
+    ]
+    
+    # Check for security indicators in domain name
+    domain_matches = [indicator for indicator in security_domain_indicators if indicator in domain_lower]
+    
+    # Check for security indicators in content
+    content_matches = []
+    if content_lower:
+        content_matches = [indicator for indicator in security_content_indicators if indicator in content_lower]
+    
+    # If we have strong security indicators (domain name AND content matches)
+    if (domain_matches and len(content_matches) >= 2) or (not domain_matches and len(content_matches) >= 4):
+        logger.info(f"Detected security company from domain {domain} and content indicators: {content_matches}")
+        
+        return {
+            "processing_status": 2,
+            "is_service_business": True,
+            "predicted_class": "Managed Service Provider",
+            "internal_it_potential": 0,
+            "confidence_scores": {
+                "Managed Service Provider": 85,
+                "Integrator - Commercial A/V": 8,
+                "Integrator - Residential A/V": 5,
+                "Internal IT Department": 0
+            },
+            "llm_explanation": f"{domain} appears to be a cybersecurity company providing security services and solutions to protect organizations from cyber threats. Based on the strong security focus in {'both the domain name and' if domain_matches else ''} website content, this is classified as a Managed Service Provider specializing in security services.",
+            "company_description": f"{domain} is a cybersecurity company providing managed security services and solutions to protect organizations from cyber threats.",
+            "detection_method": "security_domain_detection",
+            "low_confidence": False,
+            "max_confidence": 0.85
+        }
+    
+    # Check for cybersafe.sg specifically
+    if domain_lower == "cybersafe.sg":
+        logger.warning(f"Special handling for known cybersecurity domain: {domain}")
+        return {
+            "processing_status": 2,
+            "is_service_business": True,
+            "predicted_class": "Managed Service Provider",
+            "internal_it_potential": 0,
+            "confidence_scores": {
+                "Managed Service Provider": 90,
+                "Integrator - Commercial A/V": 5,
+                "Integrator - Residential A/V": 3,
+                "Internal IT Department": 0
+            },
+            "llm_explanation": f"{domain} is a cybersecurity services provider offering managed security solutions, risk assessment, and protection against cyber threats. The company focuses on security services which classifies it as a Managed Service Provider specializing in cybersecurity.",
+            "company_description": f"{domain} is a cybersecurity services provider offering managed security solutions, vulnerability assessments, and protection against cyber threats for businesses.",
+            "company_one_line": f"{domain} provides managed cybersecurity services to protect organizations.",
+            "detection_method": "domain_override",
+            "low_confidence": False,
+            "max_confidence": 0.9
+        }
+        
     # Check for special domains with known classifications
     # HostiFi - always MSP
     if "hostifi" in domain_lower:
@@ -197,7 +263,7 @@ def check_special_domain_cases(domain: str, text_content: str) -> Optional[Dict[
         
         # Look for confirmation in the content
         travel_content_terms = ["booking", "accommodation", "stay", "vacation", "holiday", "rental"]
-        if any(term in text_content.lower() for term in travel_content_terms):
+        if content_lower and any(term in content_lower for term in travel_content_terms):
             logger.warning(f"Content confirms {domain} is likely a travel/vacation site")
             return {
                 "processing_status": 2,
@@ -224,7 +290,7 @@ def check_special_domain_cases(domain: str, text_content: str) -> Optional[Dict[
         logger.warning(f"Domain {domain} contains transportation terms: {found_transport_terms}")
         # Look for confirmation in the content
         transport_content_terms = ["shipping", "logistics", "fleet", "trucking", "transportation", "delivery"]
-        if any(term in text_content.lower() for term in transport_content_terms):
+        if content_lower and any(term in content_lower for term in transport_content_terms):
             logger.warning(f"Content confirms {domain} is likely a transportation/logistics company")
             return {
                 "processing_status": 2,
