@@ -1,4 +1,4 @@
-"""Improved API response formatting utilities."""
+"""API response formatting utilities."""
 import logging
 from typing import Dict, Any, Optional
 
@@ -15,8 +15,9 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         dict: The reformatted API response
     """
-    # Debug logging for input tracking
     logger.info(f"Input to format_api_response - keys: {list(result.keys())}")
+    
+    # For debugging, log core fields if available 
     logger.info(f"Domain: {result.get('domain')}, Email: {result.get('email')}, URL: {result.get('website_url')}")
     
     # For n8n, we want a flat structure with prefixed fields
@@ -29,24 +30,33 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
         section_key = f"{prefix}_aaa_section"
         flat_result[section_key] = "=" * 20 + f" {title} " + "=" * 20
         
-        # Add fields - MODIFIED: Always add critical fields regardless of value
-        critical_fields = ["domain", "email", "website_url", "classification", "final_classification", 
-                         "confidence_score", "crawler_type", "classifier_type"]
-        
+        # Add fields
         for key, value in fields_dict.items():
-            # Always include critical fields or non-empty values
-            if value not in [None, "", 0] or key in critical_fields:
+            if value not in [None, "", 0, False] or key in ["domain", "email", "website_url", "classification", "final_classification"]:
                 flat_result[f"{prefix}_{key}"] = value
+                
+    # Special helper function to handle potentially inconsistent key names
+    def safe_get(result, key, alternative_keys=None, default=None):
+        """Safely get a value from result using key or alternative_keys."""
+        if key in result and result[key] not in [None, ""]:
+            return result[key]
+        
+        if alternative_keys:
+            for alt_key in alternative_keys:
+                if alt_key in result and result[alt_key] not in [None, ""]:
+                    return result[alt_key]
+        
+        return default
     
     # ========== DOMAIN INFO SECTION ==========
     domain_info = {
-        "domain": result.get("domain", ""),
-        "email": result.get("email", ""),
-        "website_url": result.get("website_url", ""),
+        "domain": safe_get(result, "domain"),
+        "email": safe_get(result, "email"),
+        "website_url": safe_get(result, "website_url"),
     }
     
     # Add company name from either source
-    company_name = result.get("company_name", "")
+    company_name = safe_get(result, "company_name")
     if not company_name and "apollo_data" in result and isinstance(result["apollo_data"], dict):
         company_name = result["apollo_data"].get("name", "")
     if not company_name and "ai_company_data" in result and isinstance(result["ai_company_data"], dict):
@@ -57,28 +67,35 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
     
     # ========== CLASSIFICATION SECTION ==========
     classification_info = {
-        "classification": result.get("predicted_class", ""),
-        "final_classification": result.get("final_classification", ""),
-        "confidence_score": result.get("confidence_score", 0),
-        "confidence_scores": result.get("confidence_scores", {}),
-        "is_parked": result.get("is_parked", False),
-        "low_confidence": result.get("low_confidence", True),
-        "detection_method": result.get("detection_method", ""),
-        "crawler_type": result.get("crawler_type", ""),
-        "classifier_type": result.get("classifier_type", ""),
-        "source": result.get("source", ""),
-        "explanation": result.get("explanation", "")
+        "classification": safe_get(result, "predicted_class"),
+        "final_classification": safe_get(result, "final_classification"),
+        "confidence_score": safe_get(result, "confidence_score", ["max_confidence"], 0),
+        "confidence_scores": safe_get(result, "confidence_scores", {}, {}),
+        "is_parked": safe_get(result, "is_parked", [], False),
+        "low_confidence": safe_get(result, "low_confidence", [], True),
+        "detection_method": safe_get(result, "detection_method", [], ""),
+        "crawler_type": safe_get(result, "crawler_type", [], ""),
+        "classifier_type": safe_get(result, "classifier_type", [], ""),
+        "source": safe_get(result, "source", [], ""),
+        "explanation": safe_get(result, "explanation", ["llm_explanation"], "")
     }
+    
+    # Log any missing required fields for debugging
+    required_fields = ["classification", "final_classification", "confidence_score", "crawler_type", "classifier_type"]
+    for field in required_fields:
+        if not classification_info[field]:
+            logger.warning(f"Critical field 01_{field} is missing from filtered result!")
+    
     add_section("02", "CLASSIFICATION", classification_info)
     
     # ========== AI DATA SECTION ==========
     ai_info = {
-        "description": result.get("company_description", ""),
-        "one_liner": result.get("company_one_line", "")
+        "description": safe_get(result, "company_description"),
+        "one_liner": safe_get(result, "company_one_line")
     }
     
     # Add AI extracted data
-    ai_data = result.get("ai_company_data", {})
+    ai_data = safe_get(result, "ai_company_data", {})
     if isinstance(ai_data, str):
         try:
             import json
@@ -94,7 +111,7 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
     
     # ========== APOLLO DATA SECTION ==========
     apollo_info = {}
-    apollo_data = result.get("apollo_data", {})
+    apollo_data = safe_get(result, "apollo_data", {})
     
     if isinstance(apollo_data, str):
         try:
@@ -142,7 +159,7 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
     
     # ========== RECOMMENDATIONS SECTION ==========
     rec_info = {}
-    recommendations = result.get("domotz_recommendations", {})
+    recommendations = safe_get(result, "domotz_recommendations", {})
     if recommendations and isinstance(recommendations, dict):
         rec_info["primary_value"] = recommendations.get("primary_value", "")
         rec_info["recommended_plan"] = recommendations.get("recommended_plan", "")
@@ -193,22 +210,10 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
     if other_info:
         add_section("09", "OTHER INFO", other_info)
     
-    # Filter out empty fields, but ALWAYS keep critical fields
+    # Filter out empty fields if desired
     filtered_result = {}
-    critical_field_suffixes = ["domain", "email", "website_url", "classification", 
-                              "final_classification", "confidence_score", 
-                              "crawler_type", "classifier_type"]
-    
     for key, value in flat_result.items():
-        if (value not in [None, "", 0] or 
-            "section" in key or 
-            any(key.endswith(f"_{suffix}") for suffix in critical_field_suffixes)):
+        if value not in [None, "", 0] or "section" in key or key.endswith("domain") or key.endswith("email") or key.endswith("website_url"):
             filtered_result[key] = value
-    
-    # Final debug check before returning
-    for suffix in critical_field_suffixes:
-        key = f"01_{suffix}"
-        if key not in filtered_result:
-            logger.warning(f"Critical field {key} is missing from filtered result!")
     
     return filtered_result
