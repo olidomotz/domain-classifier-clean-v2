@@ -137,8 +137,8 @@ def check_special_domain_cases(domain: str, text_content: str) -> Optional[Dict[
     """
     Check for special domain cases that need custom handling.
     
-    FIXED VERSION: Return enhancement hints rather than complete classifications
-    to allow LLM classification to still run.
+    CRITICAL CHANGE: Return enhancement hints instead of complete classifications.
+    This allows LLM classification to run but enhances the results.
     
     Args:
         domain: The domain name
@@ -148,42 +148,78 @@ def check_special_domain_cases(domain: str, text_content: str) -> Optional[Dict[
         Optional[Dict[str, Any]]: Enhancement hints if special case, None otherwise
     """
     domain_lower = domain.lower()
+    content_lower = text_content.lower() if text_content else ""
     
-    # Check for special domains with known classifications
-    # HostiFi - always MSP
-    if "hostifi" in domain_lower:
-        logger.warning(f"Special handling for known MSP domain: {domain}")
-        # Return enhancement hints, not a complete classification
+    # Check for cybersafe.sg specifically
+    if domain_lower == "cybersafe.sg":
+        logger.warning(f"Special handling for known cybersecurity domain: {domain}")
+        # CRITICAL CHANGE: Return hints instead of complete classification
         return {
             "is_security_company": True,
-            "enhancement_type": "domain_hint",
+            "enhancement_type": "domain_override_hint",
             "suggested_class": "Managed Service Provider",
-            "security_focus": "network_management",
-            "confidence_boost": 0.2  # Boost confidence by this amount if LLM also predicts MSP
+            "security_focus": "cyber_security",
+            "confidence_boost": 0.2,  # Boost confidence by this amount
+            "industry_hint": "cybersecurity"
         }
         
-    # Special handling for cybersecurity domains like cybersafe.sg
-    if "cyber" in domain_lower and ("secure" in domain_lower or "safe" in domain_lower or "security" in domain_lower):
-        logger.warning(f"Special handling for known cybersecurity domain: {domain}")
-        # Return hints that supplement LLM classification rather than replace it
+    # Check for security-focused domains
+    security_domain_indicators = ['cyber', 'security', 'secure', 'protect', 'defense', 'infosec', 'threat']
+    security_content_indicators = [
+        'cyber security', 'cybersecurity', 'information security', 'network security',
+        'security services', 'security solutions', 'managed security', 'vulnerability',
+        'penetration testing', 'security monitoring', 'threat', 'attack', 'malware',
+        'ransomware', 'firewall', 'intrusion', 'data breach', 'risk assessment',
+        'security operations', 'soc', 'security operations center', 'mssp',
+        'managed security service provider', 'security awareness',
+        'incident response', 'threat intelligence', 'endpoint protection',
+        'zero trust', 'compliance', 'audit', 'protection', 'defend'
+    ]
+    
+    # Check for security indicators in domain name
+    domain_matches = [indicator for indicator in security_domain_indicators if indicator in domain_lower]
+    
+    # Check for security indicators in content
+    content_matches = []
+    if content_lower:
+        content_matches = [indicator for indicator in security_content_indicators if indicator in content_lower]
+    
+    # If we have strong security indicators (domain name AND content matches)
+    if (domain_matches and len(content_matches) >= 2) or (not domain_matches and len(content_matches) >= 4):
+        logger.info(f"Detected security company from domain {domain} and content indicators: {content_matches}")
+        
+        # CRITICAL CHANGE: Return hints instead of complete classification
         return {
             "is_security_company": True,
-            "enhancement_type": "domain_hint",
-            "domain_category": "cybersecurity",
-            "confidence_boost": 0.15
-            # No suggested_class to allow LLM to determine this
+            "enhancement_type": "security_detection_hint",
+            "suggested_class": "Managed Service Provider",
+            "security_focus": "cyber_security",
+            "confidence_boost": 0.15,
+            "industry_hint": "cybersecurity"
+        }
+    
+    # Check for HostiFi
+    if "hostifi" in domain_lower:
+        logger.info(f"Special case handling for known MSP domain: {domain}")
+        # CRITICAL CHANGE: Return hints instead of complete classification
+        return {
+            "is_service_business": True,
+            "enhancement_type": "domain_override_hint",
+            "suggested_class": "Managed Service Provider", 
+            "service_focus": "network_management",
+            "confidence_boost": 0.2
         }
         
     # Special handling for ciao.dk (known problematic vacation rental site)
     if domain_lower == "ciao.dk":
         logger.warning(f"Special handling for known vacation rental domain: {domain}")
-        # Return enhancement hints, not a complete override
+        # CRITICAL CHANGE: Return hints instead of complete classification
         return {
             "is_service_business": False,
             "enhancement_type": "domain_override_hint",
             "suggested_class": "Internal IT Department",
             "industry_hint": "travel_and_tourism",
-            "confidence_boost": 0.2
+            "confidence_boost": 0.15
         }
         
     # Check for other vacation/travel-related domains
@@ -194,9 +230,9 @@ def check_special_domain_cases(domain: str, text_content: str) -> Optional[Dict[
         
         # Look for confirmation in the content
         travel_content_terms = ["booking", "accommodation", "stay", "vacation", "holiday", "rental"]
-        if any(term in text_content.lower() for term in travel_content_terms):
+        if content_lower and any(term in content_lower for term in travel_content_terms):
             logger.warning(f"Content confirms {domain} is likely a travel/vacation site")
-            # Return enhancement hints, not a complete override
+            # CRITICAL CHANGE: Return hints instead of complete classification
             return {
                 "is_service_business": False,
                 "enhancement_type": "domain_industry_hint",
@@ -212,9 +248,9 @@ def check_special_domain_cases(domain: str, text_content: str) -> Optional[Dict[
         logger.warning(f"Domain {domain} contains transportation terms: {found_transport_terms}")
         # Look for confirmation in the content
         transport_content_terms = ["shipping", "logistics", "fleet", "trucking", "transportation", "delivery"]
-        if any(term in text_content.lower() for term in transport_content_terms):
+        if content_lower and any(term in content_lower for term in transport_content_terms):
             logger.warning(f"Content confirms {domain} is likely a transportation/logistics company")
-            # Return enhancement hints, not a complete override
+            # CRITICAL CHANGE: Return hints instead of complete classification
             return {
                 "is_service_business": False,
                 "enhancement_type": "domain_industry_hint",
