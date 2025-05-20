@@ -1,5 +1,6 @@
 """API response formatting utilities."""
 import logging
+import json
 from typing import Dict, Any, Optional
 
 # Set up logging
@@ -8,6 +9,7 @@ logger = logging.getLogger(__name__)
 def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
     """
     Format the API response for better PowerShell display and n8n access.
+    Optimized for reliability and performance.
     
     Args:
         result: The original API response
@@ -23,18 +25,6 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
     # For n8n, we want a flat structure with prefixed fields
     flat_result = {}
     
-    # ========== UTILITY FUNCTION ==========
-    def add_section(prefix, title, fields_dict):
-        """Add a section to the flat result with the given prefix and title."""
-        # Add section marker with "aaa" to ensure it appears first
-        section_key = f"{prefix}_aaa_section"
-        flat_result[section_key] = "=" * 20 + f" {title} " + "=" * 20
-        
-        # Add fields
-        for key, value in fields_dict.items():
-            if value not in [None, "", 0, False] or key in ["domain", "email", "website_url", "classification", "final_classification"]:
-                flat_result[f"{prefix}_{key}"] = value
-                
     # Special helper function to handle potentially inconsistent key names
     def safe_get(result, key, alternative_keys=None, default=None):
         """Safely get a value from result using key or alternative_keys."""
@@ -47,6 +37,18 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
                     return result[alt_key]
         
         return default
+        
+    # ========== UTILITY FUNCTION ==========
+    def add_section(prefix, title, fields_dict):
+        """Add a section to the flat result with the given prefix and title."""
+        # Add section marker with "aaa" to ensure it appears first
+        section_key = f"{prefix}_aaa_section"
+        flat_result[section_key] = "=" * 20 + f" {title} " + "=" * 20
+        
+        # Add fields
+        for key, value in fields_dict.items():
+            if value not in [None, "", 0, False] or key in ["domain", "email", "website_url", "classification", "final_classification"]:
+                flat_result[f"{prefix}_{key}"] = value
     
     # ========== DOMAIN INFO SECTION ==========
     domain_info = {
@@ -67,8 +69,8 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
     
     # ========== CLASSIFICATION SECTION ==========
     classification_info = {
-        "classification": safe_get(result, "predicted_class"),
-        "final_classification": safe_get(result, "final_classification"),
+        "classification": safe_get(result, "predicted_class", ["classification"], ""),
+        "final_classification": safe_get(result, "final_classification", [], ""),
         "confidence_score": safe_get(result, "confidence_score", ["max_confidence"], 0),
         "confidence_scores": safe_get(result, "confidence_scores", {}, {}),
         "is_parked": safe_get(result, "is_parked", [], False),
@@ -98,14 +100,14 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
     ai_data = safe_get(result, "ai_company_data", {})
     if isinstance(ai_data, str):
         try:
-            import json
             ai_data = json.loads(ai_data)
         except:
             ai_data = {}
             
     if ai_data and isinstance(ai_data, dict):
         for key, value in ai_data.items():
-            ai_info[key] = value
+            if value not in [None, "", 0]:
+                ai_info[key] = value
     
     add_section("03", "AI DATA", ai_info)
     
@@ -115,14 +117,14 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
     
     if isinstance(apollo_data, str):
         try:
-            import json
             apollo_data = json.loads(apollo_data)
         except:
             apollo_data = {}
             
     if apollo_data and isinstance(apollo_data, dict):
         for key, value in apollo_data.items():
-            apollo_info[key] = value
+            if value not in [None, "", 0]:
+                apollo_info[key] = value
     
     add_section("04", "APOLLO DATA", apollo_info)
     
@@ -195,25 +197,4 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
         
         add_section("08", "MISCLASSIFICATION WARNING", misclass_info)
     
-    # Ensure any other important fields from the original result are preserved
-    important_fields = [
-        "is_anti_scraping", "is_ssl_error", "is_dns_error", "is_connection_error",
-        "is_access_denied", "is_not_found", "is_server_error", "is_robots_restricted",
-        "is_timeout", "is_crawl_error", "bulk_process_id"
-    ]
-    
-    other_info = {}
-    for field in important_fields:
-        if field in result and result[field]:
-            other_info[field] = result[field]
-    
-    if other_info:
-        add_section("09", "OTHER INFO", other_info)
-    
-    # Filter out empty fields if desired
-    filtered_result = {}
-    for key, value in flat_result.items():
-        if value not in [None, "", 0] or "section" in key or key.endswith("domain") or key.endswith("email") or key.endswith("website_url"):
-            filtered_result[key] = value
-    
-    return filtered_result
+    return flat_result
