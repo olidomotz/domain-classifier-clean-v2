@@ -1,4 +1,3 @@
-"""Text processing utilities for domain classification."""
 import re
 import logging
 import json
@@ -20,12 +19,9 @@ def clean_json_string(json_str: str) -> str:
     # Replace control characters
     cleaned = re.sub(r'[\x00-\x1F\x7F]', '', json_str)
     
-    # Replace single quotes with double quotes
-    cleaned = re.sub(r"'([^']*)':", r'"\1":', cleaned)
-    
-    # Fix trailing commas
-    cleaned = re.sub(r',\s*}', '}', cleaned)
+    # Fix trailing commas in arrays and objects
     cleaned = re.sub(r',\s*]', ']', cleaned)
+    cleaned = re.sub(r',\s*}', '}', cleaned)
     
     # Fix missing quotes around property names
     cleaned = re.sub(r'([{,]\s*)(\w+)(\s*:)', r'\1"\2"\3', cleaned)
@@ -36,6 +32,20 @@ def clean_json_string(json_str: str) -> str:
     # Handle decimal values without leading zero
     cleaned = re.sub(r':\s*\.(\d+)', r': 0.\1', cleaned)
     
+    # Fix missing commas between properties
+    cleaned = re.sub(r'("\s*)\}(\s*")', r'\1},\2', cleaned)
+    cleaned = re.sub(r'("\s*)\](\s*")', r'\1],\2', cleaned)
+    
+    # Fix missing commas between values in arrays
+    cleaned = re.sub(r'(true|false|null|"[^"]*"|[\d\.]+)(\s*)("[^"]*"|\{|\[|true|false|null|[\d\.]+)', 
+                    r'\1,\2\3', cleaned)
+    
+    # Fix line breaks that might break string literals
+    cleaned = re.sub(r'(".*?)(\r\n|\n|\r)(.*?")', r'\1 \3', cleaned, flags=re.DOTALL)
+    
+    # Remove BOM and other invisible characters
+    cleaned = cleaned.replace('\ufeff', '')
+    
     # Try to fix quotes within quotes in explanation fields by escaping them
     if '"llm_explanation"' in cleaned:
         # Complex regex to find the explanation field and properly escape quotes
@@ -45,14 +55,14 @@ def clean_json_string(json_str: str) -> str:
             explanation_text = match.group(1)
             # Escape any unescaped quotes within the explanation
             fixed_explanation = explanation_text.replace('"', '\\"')
-            # Replace back in the original string
+            # Replace back in the cleaned string
             cleaned = cleaned.replace(explanation_text, fixed_explanation)
     
     return cleaned
 
 def extract_json(text: str) -> Optional[str]:
     """
-    Extract JSON from text response.
+    Extract JSON from text response with improved reliability.
     
     Args:
         text: The text to extract JSON from
@@ -60,17 +70,41 @@ def extract_json(text: str) -> Optional[str]:
     Returns:
         str: The extracted JSON string, or None if not found
     """
+    # First try to find a complete, well-formed JSON object
+    full_json_pattern = r'(\{[\s\S]*\})'
+    full_match = re.search(full_json_pattern, text)
+    if full_match:
+        json_str = full_match.group(1)
+        # Try to parse it directly
+        try:
+            json.loads(json_str)
+            return json_str  # If it parses, return it immediately
+        except json.JSONDecodeError:
+            # If it doesn't parse, continue to other patterns
+            pass
+    
     # Try multiple patterns to extract JSON
     json_patterns = [
-        r'({[\s\S]*"predicted_class"[\s\S]*})',  # Most general pattern
-        r'```(?:json)?\s*({[\s\S]*})\s*```',     # For markdown code blocks
-        r'({[\s\S]*"confidence_scores"[\s\S]*})' # Alternative key pattern
+        r'(\{[\s\S]*"predicted_class"[\s\S]*\})',  # Most general pattern
+        r'```(?:json)?\s*({[\s\S]*?})\s*```',     # For markdown code blocks
+        r'(\{[\s\S]*"confidence_scores"[\s\S]*\})' # Alternative key pattern
     ]
     
     for pattern in json_patterns:
         json_match = re.search(pattern, text, re.DOTALL)
         if json_match:
-            return json_match.group(1)
+            candidate = json_match.group(1).strip()
+            # Verify it at least starts and ends with {} and contains some internal content
+            if candidate.startswith('{') and candidate.endswith('}') and len(candidate) > 10:
+                return candidate
+    
+    # Look for partial JSON with key fields and try to complete it
+    if '"predicted_class"' in text and '"confidence_scores"' in text:
+        start_idx = text.find('{')
+        end_idx = text.rfind('}')
+        if start_idx >= 0 and end_idx > start_idx:
+            partial_json = text[start_idx:end_idx+1]
+            return partial_json
             
     return None
 
@@ -103,190 +137,155 @@ def detect_minimal_content(content: str) -> bool:
             
     return False
 
-def remove_redundancy(description: str, domain: str) -> str:
+def remove_redundancy(text: str, domain: str = None) -> str:
     """
-    Process a company description to remove redundancy, technology mentions,
-    and Internal IT department references while preserving appropriate length (~100 words).
+    Remove redundant phrases from a text.
     
     Args:
-        description: The original description
-        domain: The domain name
+        text: The text to process
+        domain: Optional domain name for context
         
     Returns:
-        str: Cleaned, non-redundant description
+        str: The processed text with redundancies removed
     """
-    # Get company name without domain extension
-    company_name = domain.split('.')[0]
+    # Skip if text is too short
+    if not text or len(text) < 20:
+        return text
+        
+    # Convert domain to company name format if provided
+    company_name = None
+    if domain:
+        company_name = domain.split('.')[0].capitalize()
     
-    # Replace full domain with just the company name to avoid repetition
-    description = re.sub(rf"{re.escape(domain)}", company_name, description)
-    
-    # Remove repeated mentions of business type
-    description = re.sub(r'(managed service provider|msp).*?\b\1\b', r'\1', description, flags=re.IGNORECASE)
-    description = re.sub(r'(commercial a\/v integrator).*?\b\1\b', r'\1', description, flags=re.IGNORECASE)
-    description = re.sub(r'(residential a\/v integrator).*?\b\1\b', r'\1', description, flags=re.IGNORECASE)
-    description = re.sub(r'(internal it department).*?\b\1\b', r'\1', description, flags=re.IGNORECASE)
-    
-    # Remove generic phrases that don't add information
-    generic_phrases = [
-        r'as a managed service provider',
-        r'as an integrator',
+    # List of redundant phrases to remove
+    redundant_phrases = [
         r'allowing (?:clients|customers) to focus on (?:their|its) core business',
-        r'tailored to meet the unique needs of each client',
-        r'leveraging a range of technologies',
-        r'with a focus on quality',
-        r'with a commitment to excellence',
-        r'using the latest technologies',
-        r'using cutting-edge technologies',
-        r'state-of-the-art'
+        r'with a focus on customer service',
+        r'with a commitment to quality',
+        r'with a dedication to excellence',
+        r'with a focus on (?:excellence|quality|service)',
+        r'for businesses of all sizes',
+        r'for all your .* needs',
+        r'providing quality .* services',
+        r'premier provider of',
+        r'trusted provider of',
+        r'industry-leading',
+        r'state-of-the-art',
+        r'cutting-edge',
+        r'one-stop-shop for'
     ]
     
-    for phrase in generic_phrases:
-        description = re.sub(phrase, '', description, flags=re.IGNORECASE)
+    # Add domain-specific redundant phrases
+    if company_name:
+        domain_phrases = [
+            fr'{company_name} is a (?:leading|premier|trusted) (?:provider of|company for)',
+            fr'{company_name} offers a wide range of',
+            fr'{company_name} specializes in providing',
+        ]
+        redundant_phrases.extend(domain_phrases)
     
-    # Remove technology names/specific technology mentions
-    tech_patterns = [
-        r'using \w+ (?:and|,) \w+ (technologies|platforms|solutions)',
-        r'based on \w+ platform',
-        r'cloud-based \w+ platform',
-        r'proprietary \w+ platform',
-        r'leverages? \w+ technology',
-        r'through \w+ software',
-        r'utilizing \w+ solutions',
-        r'with \w+ tools',
-        r'powered by \w+',
-        r'with (?:a|the) \w+ platform'
-    ]
+    # Remove redundant phrases
+    result = text
+    for phrase in redundant_phrases:
+        result = re.sub(phrase, '', result, flags=re.IGNORECASE)
     
-    for pattern in tech_patterns:
-        description = re.sub(pattern, '', description, flags=re.IGNORECASE)
+    # Fix spacing issues from removals
+    result = re.sub(r'\s+', ' ', result).strip()
+    result = re.sub(r'\s+\.', '.', result)
+    result = re.sub(r'\s+,', ',', result)
     
-    # Remove specific references to internal IT department activities
-    it_patterns = [
-        r'(?:with|has) (?:an|their own) (?:internal|in-house) IT (?:department|team|staff)',
-        r'(?:maintains|supports) (?:an|their) (?:internal|in-house) IT infrastructure',
-        r'(?:their|its) (?:internal|in-house) IT (?:department|team) (?:manages|supports|maintains)',
-        r'(?:relies on|uses) (?:an|their) internal IT (?:department|team)',
-        r'internal IT needs',
-        r'IT infrastructure',
-        r'IT operations'
-    ]
+    # Add logging for debugging
+    word_count_before = len(text.split())
+    word_count_after = len(result.split())
+    if word_count_before != word_count_after:
+        logger.info(f"Description after redundancy removal has {word_count_after} words")
     
-    for pattern in it_patterns:
-        description = re.sub(pattern, '', description, flags=re.IGNORECASE)
-    
-    # Focus on what the business does, not its IT department
-    # For companies classified as "Internal IT Department", make sure we're talking about the business
-    if "internal it department" in description.lower():
-        # Change mentions of "Internal IT Department" to more business-focused language
-        description = re.sub(
-            r'is (?:an?|the) internal IT department', 
-            'is a business', 
-            description, 
-            flags=re.IGNORECASE
-        )
-        
-        # If the company is described primarily by its IT department, refocus
-        description = re.sub(
-            r'focuses on (?:managing|maintaining) (?:its|their) technology',
-            'operates in its industry sector',
-            description,
-            flags=re.IGNORECASE
-        )
-    
-    # Remove double spaces and clean up
-    description = re.sub(r'\s+', ' ', description).strip()
-    description = re.sub(r'\s*,\s*,', ',', description)
-    description = re.sub(r'\s*\.\s*\.', '.', description)
-    
-    # Ensure the description ends with a period
-    if not description.endswith('.'):
-        description += '.'
-        
-    # Make sure we don't shorten too much - we want approximately 100 words
-    word_count = len(description.split())
-    
-    # Log the word count
-    logger.info(f"Description after redundancy removal has {word_count} words")
-    
-    return description
+    return result
 
-def generate_one_line_description(content: str, predicted_class: str, domain: str, company_description: str = "") -> str:
+def extract_explanation(text: str) -> Optional[str]:
     """
-    Generate a concise one-line description of what the company does without redundancy.
+    Extract an explanation from free-form text.
     
     Args:
-        content: The website content
-        predicted_class: The predicted class
-        domain: The domain name
-        company_description: Existing longer company description
+        text: The text to extract from
         
     Returns:
-        str: A concise one-line description
+        str: The extracted explanation, or None if not found
     """
-    # First try to extract from longer description
-    if company_description:
-        # Look for sentences that describe what the company does
-        sentences = re.split(r'(?<=[.!?])\s+', company_description)
-        
-        for sentence in sentences:
-            # Skip sentences that talk about classification
-            if re.search(r'(classif|previous|based on|was)', sentence, re.IGNORECASE):
-                continue
-                
-            # Look for sentences with action verbs that describe services
-            if re.search(r'(provide|offer|specialize|focus|deliver)', sentence, re.IGNORECASE):
-                # Clean up, remove redundancy, and return
-                return remove_redundancy(sentence.strip(), domain)
-            
-        # If no sentence with action verbs, try first sentence if it's descriptive enough
-        if sentences and len(sentences) > 0 and len(sentences[0]) > 20:
-            # Skip if it talks about classification
-            if not re.search(r'(classif|previous|based on|was)', sentences[0], re.IGNORECASE):
-                return remove_redundancy(sentences[0].strip(), domain)
+    # Look for explicit explanation markers
+    explanation_patterns = [
+        r'explanation:(.*?)(?:\n\n|\Z)',
+        r'llm explanation:(.*?)(?:\n\n|\Z)',
+        r'reasoning:(.*?)(?:\n\n|\Z)',
+        r'analysis:(.*?)(?:\n\n|\Z)',
+    ]
     
-    # Fall back to content extraction
-    if content:
-        # Look for common descriptive patterns
-        patterns = [
-            rf"{re.escape(domain)}(?:\s+is)?\s+(?:a|an)\s+([^.]+)",
-            r"(?:we|our company)\s+(?:provide|offer|specialize in|are)\s+([^.]+)",
-            r"(?:leading|premier|trusted)\s+provider\s+of\s+([^.]+)"
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, content, re.IGNORECASE)
-            if match and len(match.group(1)) > 10:
-                desc = match.group(1).strip()
-                # Convert "we provide" to "{domain} provides"
-                desc = re.sub(r'^we ', f"{domain} ", desc, flags=re.IGNORECASE)
-                desc = re.sub(r'^our company ', f"{domain} ", desc, flags=re.IGNORECASE)
-                
-                # Format as a complete sentence if needed
-                if not desc.lower().startswith(domain.lower()):
-                    desc = f"{domain} is {desc}."
-                if not desc.endswith('.'):
-                    desc += '.'
-                    
-                return remove_redundancy(desc, domain)
+    for pattern in explanation_patterns:
+        match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+        if match:
+            explanation = match.group(1).strip()
+            if len(explanation) > 50:  # Ensure it's substantial
+                return explanation
     
-    # Generate a basic description based on the class
-    if predicted_class == "Managed Service Provider":
-        return f"{domain} offers IT services and network management for businesses."
-    elif predicted_class == "Integrator - Commercial A/V":
-        return f"{domain} installs audiovisual systems for commercial environments."
-    elif predicted_class == "Integrator - Residential A/V":
-        return f"{domain} specializes in home automation and entertainment systems."
-    elif predicted_class == "Parked Domain":
-        return f"{domain} is a parked domain with no active business."
-    elif predicted_class == "Internal IT Department":
-        return f"{domain} is a business that operates in its industry sector."
+    # If no explicit marker, look for STEP format
+    step_pattern = r'STEP 1:.*?STEP [2-5]:'
+    match = re.search(step_pattern, text, re.IGNORECASE | re.DOTALL)
+    if match:
+        explanation = match.group(0).strip()
+        if len(explanation) > 50:
+            return explanation + " " + text.split("STEP 5:", 1)[-1].strip()
+    
+    # As a last resort, just return the raw text if it's not too long
+    if len(text) < 1000:
+        return text
+        
+    return None
+
+def generate_explanation(predicted_class: str, domain: str = None, 
+                        is_service: bool = True, internal_it_potential: int = None) -> str:
+    """
+    Generate a standard explanation for a classification.
+    
+    Args:
+        predicted_class: The predicted class
+        domain: Optional domain name for context
+        is_service: Whether the business is a service business
+        internal_it_potential: Internal IT potential (0-100)
+        
+    Returns:
+        str: The generated explanation
+    """
+    domain_name = domain or "This domain"
+    
+    # Format the explanation with step-by-step decision tree format
+    explanation = f"STEP 1: The website content provides sufficient information to analyze and classify this business.\n\n"
+    explanation += f"STEP 2: {domain_name} is not a parked or inactive domain.\n\n"
+    
+    if is_service:
+        explanation += f"STEP 3: {domain_name} is a technology service/management business that provides services to external clients.\n\n"
+        
+        if predicted_class == "Managed Service Provider":
+            explanation += f"STEP 4: The business is classified as a Managed Service Provider because it primarily offers IT infrastructure management, security services, and ongoing technical support to clients.\n\n"
+        elif predicted_class == "Integrator - Commercial A/V":
+            explanation += f"STEP 4: The business is classified as a Commercial A/V Integrator because it primarily designs and installs audio-visual systems for commercial environments like offices and conference rooms.\n\n"
+        elif predicted_class == "Integrator - Residential A/V":
+            explanation += f"STEP 4: The business is classified as a Residential A/V Integrator because it primarily focuses on home automation and entertainment systems for residential clients.\n\n"
+        
+        explanation += f"STEP 5: Since this is classified as a service business, the internal IT potential is set to 0/100.\n\n"
     else:
-        return f"{domain} is a business with specific industry needs."
+        explanation += f"STEP 3: {domain_name} is NOT a technology service/management business. It does not appear to provide IT or A/V services to clients.\n\n"
+        explanation += f"STEP 4: Since this is not a service business, it is classified as Internal IT Department.\n\n"
+        
+        if internal_it_potential is not None:
+            explanation += f"STEP 5: Based on the company size and industry, the internal IT potential is assessed at {internal_it_potential}/100.\n\n"
+        else:
+            explanation += f"STEP 5: The company's internal IT potential could not be accurately determined from the available information.\n\n"
+    
+    return explanation
 
 def extract_company_description(content: str, explanation: str, domain: str) -> str:
     """
-    Extract or generate a concise company description without technology mentions.
+    Extract or generate a concise company description.
     
     Args:
         content: The website content
@@ -294,7 +293,7 @@ def extract_company_description(content: str, explanation: str, domain: str) -> 
         domain: The domain name
         
     Returns:
-        str: A concise company description without redundancy
+        str: A concise company description
     """
     # First try to extract from LLM explanation
     description_patterns = [
@@ -316,8 +315,7 @@ def extract_company_description(content: str, explanation: str, domain: str) -> 
             if not desc.lower().startswith(domain.lower()):
                 desc = f"{domain} {desc}"
                 
-            # Process to remove redundancy and technology mentions
-            return remove_redundancy(desc, domain)
+            return desc
     
     # If explanation doesn't yield a good description, try to extract from website content
     if content:
@@ -340,33 +338,27 @@ def extract_company_description(content: str, explanation: str, domain: str) -> 
                 # Ensure it starts with the domain name
                 if not desc.lower().startswith(domain.lower()):
                     desc = f"{domain} {desc}"
-                
-                # Process to remove redundancy and technology mentions
-                return remove_redundancy(desc, domain)
+                    
+                # Limit length
+                if len(desc) > 200:
+                    desc = desc[:197] + "..."
+                    
+                return desc
     
-    # Fall back to using information from the explanation, focusing on the business, not IT
+    # Fall back to using information from the explanation
     predicted_class = ""
     if "managed service provider" in explanation.lower():
-        predicted_class = "a managed service provider offering IT services"
+        predicted_class = "a Managed Service Provider offering IT services and solutions"
     elif "commercial a/v" in explanation.lower():
-        predicted_class = "a commercial A/V integrator providing audiovisual solutions for businesses"
+        predicted_class = "a Commercial A/V Integrator providing audiovisual solutions for businesses"
     elif "residential a/v" in explanation.lower():
-        predicted_class = "a residential A/V integrator specializing in home automation systems"
+        predicted_class = "a Residential A/V Integrator specializing in home automation and entertainment systems"
     elif "internal it" in explanation.lower():
-        # For Internal IT, focus on the business itself, not IT department
-        industry_hints = re.search(r'in the (\w+) (industry|sector|field)', explanation, re.IGNORECASE)
-        if industry_hints:
-            industry = industry_hints.group(1)
-            predicted_class = f"a business operating in the {industry} sector"
-        else:
-            predicted_class = "a business entity"
+        predicted_class = "a business with internal IT needs rather than an IT service provider"
     else:
-        predicted_class = "a business whose specific activities couldn't be determined"
+        predicted_class = "a business whose specific activities couldn't be determined with high confidence"
     
-    description = f"{domain} is {predicted_class}."
-    
-    # Process to remove redundancy and technology mentions
-    return remove_redundancy(description, domain)
+    return f"{domain} appears to be {predicted_class}."
 
 def extract_keywords_company_description(content: str, predicted_class: str, domain: str) -> str:
     """
@@ -421,7 +413,7 @@ def extract_keywords_company_description(content: str, predicted_class: str, dom
         if industry_keywords:
             industry_text = f" for the {', '.join(industry_keywords)} {'industry' if len(industry_keywords) == 1 else 'industries'}"
             
-        return remove_redundancy(f"{domain} is a Managed Service Provider{service_text}{industry_text}.", domain)
+        return f"{domain} is a Managed Service Provider{service_text}{industry_text}."
         
     elif predicted_class == "Integrator - Commercial A/V":
         solutions = []
@@ -442,7 +434,7 @@ def extract_keywords_company_description(content: str, predicted_class: str, dom
         if industry_keywords:
             industry_text = f" for the {', '.join(industry_keywords)} {'sector' if len(industry_keywords) == 1 else 'sectors'}"
             
-        return remove_redundancy(f"{domain} is a Commercial A/V Integrator{solution_text}{industry_text}.", domain)
+        return f"{domain} is a Commercial A/V Integrator{solution_text}{industry_text}."
         
     elif predicted_class == "Integrator - Residential A/V":
         solutions = []
@@ -459,7 +451,7 @@ def extract_keywords_company_description(content: str, predicted_class: str, dom
         if solutions:
             solution_text = f" specializing in {', '.join(solutions)}"
             
-        return remove_redundancy(f"{domain} is a Residential A/V Integrator{solution_text} for home environments.", domain)
+        return f"{domain} is a Residential A/V Integrator{solution_text} for home environments."
         
     else:  # Internal IT Department / non-service business
         business_type = ""
@@ -468,4 +460,72 @@ def extract_keywords_company_description(content: str, predicted_class: str, dom
         else:
             business_type = "a business entity"
             
-        return remove_redundancy(f"{domain} is {business_type} that operates in its market.", domain)
+        return f"{domain} appears to be {business_type} that doesn't provide IT or A/V services to clients."
+
+def generate_one_line_description(content: str, predicted_class: str, domain: str, company_description: str = "") -> str:
+    """
+    Generate a concise one-line description of what the company does.
+    
+    Args:
+        content: The website content
+        predicted_class: The predicted class
+        domain: The domain name
+        company_description: Existing longer company description
+        
+    Returns:
+        str: A concise one-line description
+    """
+    # First try to extract the first relevant sentence from the longer description
+    if company_description:
+        # Look for sentences that describe what the company does
+        sentences = re.split(r'(?<=[.!?])\s+', company_description)
+        
+        for sentence in sentences:
+            # Skip sentences that talk about classification
+            if re.search(r'(classif|previous|based on|was)', sentence, re.IGNORECASE):
+                continue
+                
+            # Look for sentences with action verbs that describe services
+            if re.search(r'(provide|offer|specialize|focus|deliver)', sentence, re.IGNORECASE):
+                # Clean up and return the sentence
+                return sentence.strip()
+            
+        # If no sentence with action verbs, try first sentence if it's descriptive enough
+        if sentences and len(sentences) > 0 and len(sentences[0]) > 20:
+            # Skip if it talks about classification
+            if not re.search(r'(classif|previous|based on|was)', sentences[0], re.IGNORECASE):
+                return sentences[0].strip()
+    
+    # Fall back to content extraction
+    if content:
+        # Look for common descriptive patterns
+        patterns = [
+            rf"{re.escape(domain)}(?:\s+is)?\s+(?:a|an)\s+([^.]+)",
+            r"(?:we|our company)\s+(?:provide|offer|specialize in|are)\s+([^.]+)",
+            r"(?:leading|premier|trusted)\s+provider\s+of\s+([^.]+)"
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, content, re.IGNORECASE)
+            if match and len(match.group(1)) > 10:
+                desc = match.group(1).strip()
+                # Convert "we provide" to "{domain} provides"
+                desc = re.sub(r'^we ', f"{domain} ", desc, flags=re.IGNORECASE)
+                desc = re.sub(r'^our company ', f"{domain} ", desc, flags=re.IGNORECASE)
+                
+                # Format as a complete sentence if needed
+                if not desc.lower().startswith(domain.lower()):
+                    return f"{domain} is {desc}."
+                return f"{desc}."
+    
+    # Generate a basic description based on the class
+    if predicted_class == "Managed Service Provider":
+        return f"{domain} is an IT service provider offering managed technology solutions."
+    elif predicted_class == "Integrator - Commercial A/V":
+        return f"{domain} installs and maintains audiovisual systems for businesses."
+    elif predicted_class == "Integrator - Residential A/V":
+        return f"{domain} specializes in home automation and entertainment systems."
+    elif predicted_class == "Parked Domain":
+        return f"{domain} is a parked domain with no active business."
+    else:  # Internal IT Department / non-service business
+        return f"{domain} is a business with internal IT needs."
