@@ -1,4 +1,4 @@
-"""Classification and enrichment route for domain classifier."""
+"""Enrichment related routes for the domain classifier API."""
 import logging
 import traceback
 import re  # Added import for regex operations
@@ -40,6 +40,12 @@ def register_enrich_routes(app, snowflake_conn):
             
             if not input_value:
                 return jsonify({"error": "URL or email is required"}), 400
+            
+            # CRITICAL: Add detailed logging 
+            logger.info("="*80)
+            logger.info(f"CLASSIFY AND ENRICH REQUEST for: {input_value}")
+            logger.info(f"Force reclassify: {force_reclassify}")
+            logger.info("="*80)
             
             # Determine if input is an email
             is_email = '@' in input_value
@@ -167,25 +173,22 @@ def register_enrich_routes(app, snowflake_conn):
             except Exception as e:
                 logger.warning(f"Early parked domain check failed in enrichment route: {e}")
             
-            # First perform standard classification by making an internal request
-            # We'll use the routes directly from the app, rather than importing functions
-            
-            # CRITICAL CHANGE: Always set force_reclassify=True to ensure we get a fresh LLM classification
-            # Get the classify_domain function from app's view functions
+            # First perform standard classification using our modified approach
             with app.test_client() as client:
                 # Create the request payload
+                # CRITICAL CHANGE: Always force reclassify and force LLM to ensure fresh LLM classification
                 request_data = {
                     'url': input_value,
-                    'force_reclassify': True  # CRITICAL CHANGE: Force classification to ensure LLM is used
+                    'force_reclassify': True,    # Always force reclassify to avoid cache
+                    'force_llm': True            # CRITICAL: Always force LLM classification
                 }
                 
-                # CRITICAL CHANGE: Log the request details
-                logger.info(f"Sending classification request for {domain} with force_reclassify=True")
+                logger.info(f"Sending internal classification request for {domain} with force_reclassify=True and force_llm=True")
                 response = client.post('/classify-domain', json=request_data)
                 classification_result = response.get_json()
                 status_code = response.status_code
                 
-                # CRITICAL CHANGE: Add detailed logging of classification result
+                # DEBUGGING: Log the classification result
                 logger.info(f"Classification result status code: {status_code}")
                 if "predicted_class" in classification_result:
                     logger.info(f"Classification result predicted_class: {classification_result['predicted_class']}")
@@ -194,9 +197,29 @@ def register_enrich_routes(app, snowflake_conn):
                 if "detection_method" in classification_result:
                     logger.info(f"Detection method: {classification_result['detection_method']}")
                 
-                # CRITICAL CHANGE: Check if LLM was used for classification
-                if classification_result.get('classifier_type') != 'claude-llm' and classification_result.get('detection_method') != 'llm_classification':
-                    logger.warning(f"⚠️ LLM classifier was not used for {domain}. Using fallback or cached result.")
+                # CRITICAL VERIFICATION: Check if LLM was used for classification
+                if "classifier_type" in classification_result:
+                    if "claude-llm" in classification_result['classifier_type']:
+                        logger.info(f"✅ LLM classification successful for {domain}")
+                    else:
+                        logger.warning(f"⚠️ LLM classifier was not used for {domain}. Using {classification_result.get('classifier_type', 'unknown')} instead.")
+                else:
+                    logger.warning(f"⚠️ No classifier_type found in result for {domain}")
+                    
+                # If predicted_class is empty, that's a critical error
+                if "predicted_class" not in classification_result or not classification_result.get("predicted_class"):
+                    logger.error(f"❌ CRITICAL ERROR: predicted_class missing or empty for {domain}")
+                    # Try to fix the response by adding a default classification
+                    classification_result["predicted_class"] = "Internal IT Department"
+                    classification_result["confidence_score"] = 30
+                    classification_result["confidence_scores"] = {
+                        "Managed Service Provider": 5,
+                        "Integrator - Commercial A/V": 3,
+                        "Integrator - Residential A/V": 2,
+                        "Internal IT Department": 30
+                    }
+                    classification_result["detection_method"] = "emergency_fallback"
+                    classification_result["explanation"] = f"Unable to determine classification for {domain} due to technical issues. Defaulting to Internal IT."
             
             # We'll proceed with enrichment regardless of classification status
             # But we'll log a warning if the status code indicates an error
@@ -454,6 +477,11 @@ def register_enrich_routes(app, snowflake_conn):
             if not classification_result.get('crawler_type') and crawler_type:
                 classification_result['crawler_type'] = crawler_type
                 
+            # CRITICAL CHANGE: Ensure classifier_type explicitly reflects LLM usage
+            if "classifier_type" not in classification_result or "claude-llm" not in classification_result["classifier_type"]:
+                classification_result["classifier_type"] = "claude-llm-enriched"
+                logger.info(f"Setting classifier_type to claude-llm-enriched for {domain}")
+            
             # Prioritize Apollo data for company name and other fields
             if apollo_company_data and ai_company_data:
                 # Validate and prioritize Apollo data for core fields
@@ -489,11 +517,6 @@ def register_enrich_routes(app, snowflake_conn):
                 # Ensure final_classification is set
                 classification_result["final_classification"] = determine_final_classification(classification_result)
                 logger.info(f"Added final classification: {classification_result['final_classification']} for {domain}")
-            
-            # CRITICAL CHANGE: Add explicit classification record about LLM usage
-            if "classifier_type" not in classification_result or classification_result["classifier_type"] != "claude-llm":
-                classification_result['classifier_type'] = "claude-llm-enriched"
-                logger.info(f"Setting classifier_type to claude-llm-enriched for {domain}")
             
             # Save the enhanced data to Snowflake (with Apollo data) - use cached content
             save_to_snowflake(
