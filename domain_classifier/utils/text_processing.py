@@ -25,9 +25,16 @@ def clean_json_string(json_str: str) -> str:
     
     # Fix missing quotes around property names (more comprehensive)
     cleaned = re.sub(r'([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:', r'\1"\2":', cleaned)
+
+    # CRITICAL FIX: Handle the specific pattern where there's a number, comma, space, number before a comma
+    # This handles cases like "internal_it_potential": 10, 0, "company" to become "internal_it_potential": 100, "company"
+    cleaned = re.sub(r':\s*(\d+)\s*,\s*(\d+)(\s*,)', r': \1\2\3', cleaned)
     
-    # IMPROVED: Fix inconsistent comma formats in numeric arrays (handling spaces better)
-    cleaned = re.sub(r'(\d+)\s*,\s*(\d+)', r'\1\2', cleaned)  # "8, 0" becomes "80" (no comma or spaces)
+    # Also handle cases where it's at the end of a line
+    cleaned = re.sub(r':\s*(\d+)\s*,\s*(\d+)(\s*})', r': \1\2\3', cleaned)
+    
+    # More general numeric cleaning (for other cases)
+    cleaned = re.sub(r'(\d+)\s*,\s*(\d+)', r'\1\2', cleaned)
     
     # Fix missing commas between object properties
     cleaned = re.sub(r'(true|false|null|"[^"]*"|\d+\.\d+|\d+)\s*}', r'\1}', cleaned)
@@ -67,6 +74,35 @@ def clean_json_string(json_str: str) -> str:
                 fixed_explanation = explanation_text.replace('"', '\\"')
                 # Replace back in the cleaned string
                 cleaned = cleaned.replace(explanation_text, fixed_explanation)
+    
+    # Final check for potential JSON issues and apply additional fixes
+    try:
+        json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        error_msg = str(e)
+        position = getattr(e, 'pos', None)
+        
+        if position is not None:
+            # Extract context around the error
+            context_start = max(0, position - 20)
+            context_end = min(len(cleaned), position + 20)
+            error_context = cleaned[context_start:context_end]
+            
+            logger.warning(f"JSON error at position {position}: {error_msg}")
+            logger.warning(f"Context: '{error_context}'")
+            
+            # Additional targeted fixes based on common patterns
+            if "Expecting property name" in error_msg:
+                # Specific fix for numbers with commas between digits that confuse the parser
+                # This is often in patterns like "key": 10, 0, "next_key"
+                number_pattern = re.compile(r':\s*(\d+)\s*,\s*(\d+)\s*,')
+                match = number_pattern.search(cleaned[max(0, position-30):position+30])
+                if match:
+                    # Fix by removing the comma between numbers
+                    old = f": {match.group(1)}, {match.group(2)}"
+                    new = f": {match.group(1)}{match.group(2)}"
+                    cleaned = cleaned.replace(old, new)
+                    logger.info(f"Applied targeted fix: '{old}' -> '{new}'")
     
     return cleaned
 
