@@ -26,15 +26,12 @@ def clean_json_string(json_str: str) -> str:
     # Fix missing quotes around property names (more comprehensive)
     cleaned = re.sub(r'([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:', r'\1"\2":', cleaned)
 
-    # CRITICAL FIX: Handle the specific pattern where there's a number, comma, space, number before a comma
-    # This handles cases like "internal_it_potential": 10, 0, "company" to become "internal_it_potential": 100, "company"
-    cleaned = re.sub(r':\s*(\d+)\s*,\s*(\d+)(\s*,)', r': \1\2\3', cleaned)
+    # CRITICAL FIX: Handle cases with X, 0 in numeric values which should be X0 (like 9, 0 to 90)
+    # This pattern is specific to confidence scores in the form of "key": X, 0, where X is a digit
+    cleaned = re.sub(r':\s*(\d+)\s*,\s*0(\s*[,}])', r': \10\2', cleaned)
     
-    # Also handle cases where it's at the end of a line
-    cleaned = re.sub(r':\s*(\d+)\s*,\s*(\d+)(\s*})', r': \1\2\3', cleaned)
-    
-    # More general numeric cleaning (for other cases)
-    cleaned = re.sub(r'(\d+)\s*,\s*(\d+)', r'\1\2', cleaned)
+    # More general fix for cases with X, Y (two digits) which should be XY
+    cleaned = re.sub(r':\s*(\d+)\s*,\s*(\d+)(\s*[,}])', r': \1\2\3', cleaned)
     
     # Fix missing commas between object properties
     cleaned = re.sub(r'(true|false|null|"[^"]*"|\d+\.\d+|\d+)\s*}', r'\1}', cleaned)
@@ -93,16 +90,24 @@ def clean_json_string(json_str: str) -> str:
             
             # Additional targeted fixes based on common patterns
             if "Expecting property name" in error_msg:
-                # Specific fix for numbers with commas between digits that confuse the parser
-                # This is often in patterns like "key": 10, 0, "next_key"
+                # Look specifically for patterns like "key": X, Y, "next_key"
+                # where X, Y represents a number with a comma (like "score": 9, 0)
                 number_pattern = re.compile(r':\s*(\d+)\s*,\s*(\d+)\s*,')
                 match = number_pattern.search(cleaned[max(0, position-30):position+30])
                 if match:
-                    # Fix by removing the comma between numbers
+                    # Fix by combining the numbers (e.g., "key": 9, 0 becomes "key": 90)
                     old = f": {match.group(1)}, {match.group(2)}"
                     new = f": {match.group(1)}{match.group(2)}"
                     cleaned = cleaned.replace(old, new)
                     logger.info(f"Applied targeted fix: '{old}' -> '{new}'")
+                
+                # Another pattern: numeric values with commas
+                value_pattern = re.compile(r'(["\w]+"\s*:\s*\d+)\s*,\s*(\d+)')
+                for match in value_pattern.finditer(cleaned):
+                    old = f"{match.group(1)}, {match.group(2)}"
+                    new = f"{match.group(1)}{match.group(2)}"
+                    cleaned = cleaned.replace(old, new)
+                    logger.info(f"Applied numeric value fix: '{old}' -> '{new}'")
     
     return cleaned
 
@@ -151,6 +156,17 @@ def extract_json(text: str) -> Optional[str]:
         if start_idx >= 0 and end_idx > start_idx:
             partial_json = text[start_idx:end_idx+1]
             return partial_json
+    
+    # NEW: If JSON extraction failed but the text contains a full JSON-like structure with predicted_class
+    # Try to manually extract key pieces
+    if '"predicted_class"' in text and '"llm_explanation"' in text:
+        logger.info("Attempting to extract classification from JSON-like text")
+        
+        # Look for the predicted class
+        predicted_class_match = re.search(r'"predicted_class"\s*:\s*"([^"]+)"', text)
+        if predicted_class_match:
+            logger.info(f"Found predicted class in text: {predicted_class_match.group(1)}")
+            return f'{{"predicted_class": "{predicted_class_match.group(1)}"}}'
             
     return None
 
@@ -593,25 +609,38 @@ def ensure_classifier_type(result: dict, domain: str = None,
     """
     domain_str = f" for {domain}" if domain else ""
     
+    # Check for API formatter output first
+    if '02_classifier_type' in result:
+        # If we have a formatted result, extract the original classifier_type
+        result['classifier_type'] = result.get('02_classifier_type')
+        logger.info(f"Found classifier_type in formatted result{domain_str}: {result['classifier_type']}")
+        return result
+        
+    # Handle case when classifier_type is missing or empty
     if "classifier_type" not in result or not result["classifier_type"]:
         if log_warning:
             logger.warning(f"No classifier_type found in result{domain_str}")
         else:
             logger.info(f"Setting classifier_type to {default_type}{domain_str}")
-            
         result["classifier_type"] = default_type
     elif "claude-llm" not in result["classifier_type"]:
-        if log_warning:
+        # Special case for 'pending_classification'
+        if result["classifier_type"] == "pending_classification":
+            logger.info(f"Upgrading pending_classification to {default_type}{domain_str}")
+            result["classifier_type"] = default_type
+        elif log_warning:
             logger.warning(f"Non-LLM classifier type found: {result['classifier_type']}{domain_str}")
-            
-        # Preserve original type info but ensure LLM is indicated
+    else:
+        # Preserve original type info but ensure enriched is indicated if needed
         if "enriched" in default_type and "enriched" not in result["classifier_type"]:
-            result["classifier_type"] = f"{result['classifier_type']}-enriched"
+            original_type = result["classifier_type"]
+            result["classifier_type"] = f"{original_type}-enriched"
             logger.info(f"Updated classifier_type to {result['classifier_type']}{domain_str}")
             
     # Ensure classifier_type is not too long for Snowflake
     if len(result["classifier_type"]) > 40:
+        original_length = len(result["classifier_type"])
         result["classifier_type"] = result["classifier_type"][:40]
-        logger.info(f"Truncated classifier_type to {result['classifier_type']}{domain_str}")
-        
+        logger.info(f"Truncated classifier_type from {original_length} to 40 chars{domain_str}")
+    
     return result
