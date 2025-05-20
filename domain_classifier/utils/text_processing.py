@@ -26,8 +26,8 @@ def clean_json_string(json_str: str) -> str:
     # Fix missing quotes around property names (more comprehensive)
     cleaned = re.sub(r'([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:', r'\1"\2":', cleaned)
     
-    # Fix inconsistent comma formats in numeric arrays (like 1,0 which should be 1, 0)
-    cleaned = re.sub(r'(\d+),(\d+)', r'\1, \2', cleaned)
+    # IMPROVED: Fix inconsistent comma formats in numeric arrays (handling spaces better)
+    cleaned = re.sub(r'(\d+)\s*,\s*(\d+)', r'\1\2', cleaned)  # "8, 0" becomes "80" (no comma or spaces)
     
     # Fix missing commas between object properties
     cleaned = re.sub(r'(true|false|null|"[^"]*"|\d+\.\d+|\d+)\s*}', r'\1}', cleaned)
