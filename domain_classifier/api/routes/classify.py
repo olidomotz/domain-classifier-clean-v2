@@ -8,6 +8,7 @@ from typing import Dict, Any, Tuple, Optional
 # Import domain utilities
 from domain_classifier.utils.domain_utils import extract_domain_from_email
 from domain_classifier.utils.error_handling import detect_error_type, create_error_result, check_domain_dns, is_domain_worth_crawling
+from domain_classifier.utils.text_processing import extract_company_description, ensure_classifier_type
 
 # Import configuration
 from domain_classifier.config.overrides import check_domain_override
@@ -17,7 +18,6 @@ from domain_classifier.crawlers.apify_crawler import crawl_website
 from domain_classifier.storage.operations import save_to_snowflake
 from domain_classifier.classifiers.result_validator import validate_result_consistency
 from domain_classifier.storage.cache_manager import process_cached_result
-from domain_classifier.utils.text_processing import extract_company_description
 from domain_classifier.storage.result_processor import process_fresh_result
 
 # Import the API formatter if available
@@ -424,9 +424,9 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
             if crawler_type:
                 classification["crawler_type"] = crawler_type
             
-            # Determine classifier type
-            classifier_type = "claude-llm"
-            classification["classifier_type"] = classifier_type
+            # UPDATED: Use ensure_classifier_type helper function instead of direct assignment
+            # This avoids warnings about classifier_type not being found
+            classification = ensure_classifier_type(classification, domain, default_type="claude-llm")
             
             # CRITICAL FIX: If we have special case enhancements, apply them to the LLM classification
             if special_case_enhancements:
@@ -485,7 +485,7 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                 classification=classification, 
                 snowflake_conn=snowflake_conn,
                 crawler_type=crawler_type,
-                classifier_type=classifier_type
+                classifier_type=classification.get("classifier_type")  # Use the set classifier_type
             )
             
             # Process the fresh classification result
@@ -495,9 +495,8 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
             if crawler_type and "crawler_type" not in result:
                 result["crawler_type"] = crawler_type
                 
-            # Add classifier_type to the result if not already included
-            if classifier_type and "classifier_type" not in result:
-                result["classifier_type"] = classifier_type
+            # Ensure classifier_type is set properly in the result
+            result = ensure_classifier_type(result, domain)
 
             # Ensure result consistency
             result = validate_result_consistency(result, domain)
