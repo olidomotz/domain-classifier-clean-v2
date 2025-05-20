@@ -1,7 +1,8 @@
 """Complete fixed enrich.py to properly return app and use LLM classification."""
 import logging
 import traceback
-import re  # Added import for regex operations
+import re
+import json
 from flask import request, jsonify, current_app
 
 # Import utilities
@@ -15,6 +16,7 @@ from domain_classifier.utils.domain_analysis import analyze_domain_words
 from domain_classifier.utils.cross_validator import reconcile_classification
 from domain_classifier.utils.json_utils import ensure_dict, safe_get
 from domain_classifier.utils.domain_utils import extract_domain_from_email, normalize_domain
+from domain_classifier.config.overrides import check_domain_override
 
 # Import the API formatter if available
 try:
@@ -26,12 +28,10 @@ except ImportError:
 # Set up logging
 logger = logging.getLogger(__name__)
 
-# This function must be exported and match exactly what __init__.py is trying to import
 def register_enrich_routes(app, snowflake_conn):
     """Register enrichment related routes."""
-    logger.info("Registering enrich routes...")
+    logger.info("Registering enrichment routes")
     
-    # Check if app is None and create fallback
     if app is None:
         logger.error("App object is None in register_enrich_routes")
         from flask import Flask
@@ -190,6 +190,28 @@ def register_enrich_routes(app, snowflake_conn):
             # First perform standard classification by making an internal request
             # We'll use the routes directly from the app, rather than importing functions
             
+            # Fix: Create a properly structured classification_result to start with
+            classification_result = {
+                "domain": domain,
+                "website_url": url,
+                "predicted_class": "Internal IT Department",  # Default, will be updated
+                "confidence_score": 50,
+                "confidence_scores": {
+                    "Managed Service Provider": 10,
+                    "Integrator - Commercial A/V": 5,
+                    "Integrator - Residential A/V": 5,
+                    "Internal IT Department": 50
+                },
+                "detection_method": "initial_default",
+                "classifier_type": "pending_classification",
+                "crawler_type": "pending",
+                "source": "initial"
+            }
+            
+            # If email was provided, add it
+            if email:
+                classification_result["email"] = email
+                
             # Call the registered classify-domain route directly using the Flask test client
             with app.test_client() as client:
                 # Create the request payload
@@ -202,29 +224,52 @@ def register_enrich_routes(app, snowflake_conn):
                 
                 logger.info(f"Sending internal classification request for {domain} with force_reclassify=True and force_llm=True")
                 response = client.post('/classify-domain', json=request_data)
-                classification_result = response.get_json()
+                
+                # IMPROVED: Better handling of the response
                 status_code = response.status_code
-                
-                # DEBUGGING: Log the classification result
                 logger.info(f"Classification result status code: {status_code}")
-                if "predicted_class" in classification_result:
-                    logger.info(f"Classification result predicted_class: {classification_result['predicted_class']}")
-                if "classifier_type" in classification_result:
-                    logger.info(f"Classifier type used: {classification_result['classifier_type']}")
-                if "detection_method" in classification_result:
-                    logger.info(f"Detection method: {classification_result['detection_method']}")
                 
-                # CRITICAL VERIFICATION: Check if LLM was used for classification
-                if "classifier_type" in classification_result:
-                    if "claude-llm" in classification_result['classifier_type']:
-                        logger.info(f"✅ LLM classification successful for {domain}")
-                    else:
-                        logger.warning(f"⚠️ LLM classifier was not used for {domain}. Using {classification_result.get('classifier_type', 'unknown')} instead.")
-                else:
-                    logger.warning(f"⚠️ No classifier_type found in result for {domain}")
-                    
+                if status_code == 200:
+                    try:
+                        # Get JSON response and log its structure
+                        response_data = response.get_json()
+                        if response_data:
+                            logger.info(f"Classification response keys: {list(response_data.keys())}")
+                            
+                            # Update our classification result with all fields from response
+                            for key, value in response_data.items():
+                                classification_result[key] = value
+                            
+                            # Log important fields
+                            if "predicted_class" in response_data:
+                                logger.info(f"Classification result predicted_class: {response_data['predicted_class']}")
+                            if "classifier_type" in response_data:
+                                logger.info(f"Classifier type used: {response_data['classifier_type']}")
+                            if "detection_method" in response_data:
+                                logger.info(f"Detection method: {response_data['detection_method']}")
+                            
+                            # Verify we have required fields
+                            if "predicted_class" not in response_data or not response_data["predicted_class"]:
+                                logger.warning("predicted_class not found in response data")
+                            if "classifier_type" not in response_data:
+                                logger.warning("classifier_type not found in response data")
+                            
+                            # CRITICAL VERIFICATION: Check if LLM was used for classification
+                            if "classifier_type" in response_data:
+                                if "claude-llm" in response_data['classifier_type']:
+                                    logger.info(f"✅ LLM classification successful for {domain}")
+                                else:
+                                    logger.warning(f"⚠️ LLM classifier was not used for {domain}. Using {response_data.get('classifier_type', 'unknown')} instead.")
+                            else:
+                                logger.warning(f"⚠️ No classifier_type found in result for {domain}")
+                        else:
+                            logger.error("Response JSON is None or empty")
+                    except Exception as parse_error:
+                        logger.error(f"Error parsing response JSON: {parse_error}")
+                        logger.error(f"Response content: {response.data}")
+                
                 # If predicted_class is empty, that's a critical error
-                if "predicted_class" not in classification_result or not classification_result.get("predicted_class"):
+                if not classification_result.get("predicted_class"):
                     logger.error(f"❌ CRITICAL ERROR: predicted_class missing or empty for {domain}")
                     # Try to fix the response by adding a default classification
                     classification_result["predicted_class"] = "Internal IT Department"
@@ -237,6 +282,9 @@ def register_enrich_routes(app, snowflake_conn):
                     }
                     classification_result["detection_method"] = "emergency_fallback"
                     classification_result["explanation"] = f"Unable to determine classification for {domain} due to technical issues. Defaulting to Internal IT."
+            
+            # Log complete classification result
+            logger.info(f"Classification result after test client: {classification_result.get('predicted_class', 'unknown')}")
             
             # We'll proceed with enrichment regardless of classification status
             # But we'll log a warning if the status code indicates an error
@@ -510,7 +558,7 @@ def register_enrich_routes(app, snowflake_conn):
                 if "name" in ai_company_data:
                     # Log warning if there's a suspicious navigation element
                     if ai_company_data["name"] and re.search(r'navigation|menu|open|close|header|footer', 
-                                                           ai_company_data.get('name', ''), re.IGNORECASE):
+                                                            ai_company_data.get('name', ''), re.IGNORECASE):
                         logger.warning(f"Suspicious AI-extracted company name detected: {ai_company_data.get('name')}. Using Apollo data instead.")
                         ai_company_data["name"] = apollo_company_data.get("name", ai_company_data["name"])
                         
