@@ -1,4 +1,4 @@
-"""Fixed classify_routes.py to properly integrate special domain handling with LLM."""
+"""Fixed classify_routes.py to properly return app and use LLM."""
 import logging
 import traceback
 from flask import request, jsonify
@@ -86,6 +86,11 @@ def check_for_parked_domain(domain: str, url: str) -> Tuple[bool, Dict[str, Any]
 
 def register_classify_routes(app, llm_classifier, snowflake_conn):
     """Register domain/email classification related routes."""
+    if app is None:
+        logger.error("App object is None in register_classify_routes")
+        from flask import Flask
+        app = Flask(__name__)
+        logger.info("Created new Flask app as fallback")
     
     @app.route('/classify-domain', methods=['POST', 'OPTIONS'])
     def classify_domain():
@@ -530,3 +535,6 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                 return jsonify(format_api_response(error_result)), 500
             else:
                 return jsonify(error_result), 500
+                
+    # CRITICAL FIX: Return the app object
+    return app
