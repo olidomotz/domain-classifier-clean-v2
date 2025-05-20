@@ -137,122 +137,53 @@ def check_special_domain_cases(domain: str, text_content: str) -> Optional[Dict[
     """
     Check for special domain cases that need custom handling.
     
+    FIXED VERSION: Return enhancement hints rather than complete classifications
+    to allow LLM classification to still run.
+    
     Args:
         domain: The domain name
         text_content: The website content
         
     Returns:
-        Optional[Dict[str, Any]]: Custom result if special case, None otherwise
+        Optional[Dict[str, Any]]: Enhancement hints if special case, None otherwise
     """
     domain_lower = domain.lower()
-    content_lower = text_content.lower() if text_content else ""
     
-    # Check for security-focused domains
-    security_domain_indicators = ['cyber', 'security', 'secure', 'protect', 'defense', 'infosec', 'threat']
-    security_content_indicators = [
-        'cyber security', 'cybersecurity', 'information security', 'network security',
-        'security services', 'security solutions', 'managed security', 'vulnerability',
-        'penetration testing', 'security monitoring', 'threat', 'attack', 'malware',
-        'ransomware', 'firewall', 'intrusion', 'data breach', 'risk assessment',
-        'security operations', 'soc', 'security operations center', 'mssp',
-        'managed security service provider', 'security awareness',
-        'incident response', 'threat intelligence', 'endpoint protection',
-        'zero trust', 'compliance', 'audit', 'protection', 'defend'
-    ]
-    
-    # Check for security indicators in domain name
-    domain_matches = [indicator for indicator in security_domain_indicators if indicator in domain_lower]
-    
-    # Check for security indicators in content
-    content_matches = []
-    if content_lower:
-        content_matches = [indicator for indicator in security_content_indicators if indicator in content_lower]
-    
-    # If we have strong security indicators (domain name AND content matches)
-    if (domain_matches and len(content_matches) >= 2) or (not domain_matches and len(content_matches) >= 4):
-        logger.info(f"Detected security company from domain {domain} and content indicators: {content_matches}")
-        
-        return {
-            "processing_status": 2,
-            "is_service_business": True,
-            "predicted_class": "Managed Service Provider",
-            "internal_it_potential": 0,
-            "confidence_scores": {
-                "Managed Service Provider": 85,
-                "Integrator - Commercial A/V": 8,
-                "Integrator - Residential A/V": 5,
-                "Internal IT Department": 0
-            },
-            "llm_explanation": f"{domain} appears to be a cybersecurity company providing security services and solutions to protect organizations from cyber threats. Based on the strong security focus in {'both the domain name and' if domain_matches else ''} website content, this is classified as a Managed Service Provider specializing in security services.",
-            "company_description": f"{domain} is a cybersecurity company providing managed security services and solutions to protect organizations from cyber threats.",
-            "detection_method": "security_domain_detection",
-            "low_confidence": False,
-            "max_confidence": 0.85
-        }
-    
-    # Check for cybersafe.sg specifically
-    if domain_lower == "cybersafe.sg":
-        logger.warning(f"Special handling for known cybersecurity domain: {domain}")
-        return {
-            "processing_status": 2,
-            "is_service_business": True,
-            "predicted_class": "Managed Service Provider",
-            "internal_it_potential": 0,
-            "confidence_scores": {
-                "Managed Service Provider": 90,
-                "Integrator - Commercial A/V": 5,
-                "Integrator - Residential A/V": 3,
-                "Internal IT Department": 0
-            },
-            "llm_explanation": f"{domain} is a cybersecurity services provider offering managed security solutions, risk assessment, and protection against cyber threats. The company focuses on security services which classifies it as a Managed Service Provider specializing in cybersecurity.",
-            "company_description": f"{domain} is a cybersecurity services provider offering managed security solutions, vulnerability assessments, and protection against cyber threats for businesses.",
-            "company_one_line": f"{domain} provides managed cybersecurity services to protect organizations.",
-            "detection_method": "domain_override",
-            "low_confidence": False,
-            "max_confidence": 0.9
-        }
-        
     # Check for special domains with known classifications
     # HostiFi - always MSP
     if "hostifi" in domain_lower:
-        logger.info(f"Special case handling for known MSP domain: {domain}")
+        logger.warning(f"Special handling for known MSP domain: {domain}")
+        # Return enhancement hints, not a complete classification
         return {
-            "processing_status": 2,
-            "is_service_business": True,
-            "predicted_class": "Managed Service Provider",
-            "internal_it_potential": 0,
-            "confidence_scores": {
-                "Managed Service Provider": 85,
-                "Integrator - Commercial A/V": 8,
-                "Integrator - Residential A/V": 5,
-                "Internal IT Department": 0
-            },
-            "llm_explanation": f"{domain} is a cloud hosting platform specializing in Ubiquiti network management. They provide managed hosting services for UniFi Controller, UISP, and other network management software, which is a clear indication they are a Managed Service Provider focused on network infrastructure management.",
-            "company_description": f"{domain} is a cloud hosting platform specializing in Ubiquiti network management and UniFi Controller hosting services.",
-            "detection_method": "domain_override",
-            "low_confidence": False,
-            "max_confidence": 0.85
+            "is_security_company": True,
+            "enhancement_type": "domain_hint",
+            "suggested_class": "Managed Service Provider",
+            "security_focus": "network_management",
+            "confidence_boost": 0.2  # Boost confidence by this amount if LLM also predicts MSP
+        }
+        
+    # Special handling for cybersecurity domains like cybersafe.sg
+    if "cyber" in domain_lower and ("secure" in domain_lower or "safe" in domain_lower or "security" in domain_lower):
+        logger.warning(f"Special handling for known cybersecurity domain: {domain}")
+        # Return hints that supplement LLM classification rather than replace it
+        return {
+            "is_security_company": True,
+            "enhancement_type": "domain_hint",
+            "domain_category": "cybersecurity",
+            "confidence_boost": 0.15
+            # No suggested_class to allow LLM to determine this
         }
         
     # Special handling for ciao.dk (known problematic vacation rental site)
     if domain_lower == "ciao.dk":
         logger.warning(f"Special handling for known vacation rental domain: {domain}")
+        # Return enhancement hints, not a complete override
         return {
-            "processing_status": 2,
             "is_service_business": False,
-            "predicted_class": "Internal IT Department",
-            "internal_it_potential": 40,
-            "confidence_scores": {
-                "Managed Service Provider": 5,
-                "Integrator - Commercial A/V": 3,
-                "Integrator - Residential A/V": 2,
-                "Internal IT Department": 40
-            },
-            "llm_explanation": f"{domain} appears to be a vacation rental/travel booking website offering holiday accommodations in various destinations. This is not a service business in the IT or A/V integration space. It's a travel industry business that might have a small internal IT department to maintain their booking systems and website.",
-            "company_description": f"{domain} is a vacation rental and travel booking website offering holiday accommodations in various destinations.",
-            "detection_method": "domain_override",
-            "low_confidence": False,
-            "max_confidence": 0.4
+            "enhancement_type": "domain_override_hint",
+            "suggested_class": "Internal IT Department",
+            "industry_hint": "travel_and_tourism",
+            "confidence_boost": 0.2
         }
         
     # Check for other vacation/travel-related domains
@@ -263,24 +194,15 @@ def check_special_domain_cases(domain: str, text_content: str) -> Optional[Dict[
         
         # Look for confirmation in the content
         travel_content_terms = ["booking", "accommodation", "stay", "vacation", "holiday", "rental"]
-        if content_lower and any(term in content_lower for term in travel_content_terms):
+        if any(term in text_content.lower() for term in travel_content_terms):
             logger.warning(f"Content confirms {domain} is likely a travel/vacation site")
+            # Return enhancement hints, not a complete override
             return {
-                "processing_status": 2,
                 "is_service_business": False,
-                "predicted_class": "Internal IT Department",
-                "internal_it_potential": 35,
-                "confidence_scores": {
-                    "Managed Service Provider": 5,
-                    "Integrator - Commercial A/V": 3,
-                    "Integrator - Residential A/V": 2,
-                    "Internal IT Department": 35
-                },
-                "llm_explanation": f"{domain} appears to be a travel/vacation related business, not an IT or A/V service provider. The website focuses on accommodations, bookings, or vacation rentals rather than technology services or integration. This type of business might have minimal internal IT needs depending on its size.",
-                "company_description": f"{domain} appears to be a travel or vacation rental business focused on accommodations and bookings.",
-                "detection_method": "domain_override",
-                "low_confidence": False,
-                "max_confidence": 0.35
+                "enhancement_type": "domain_industry_hint",
+                "suggested_class": "Internal IT Department",
+                "industry_hint": "travel_and_tourism",
+                "confidence_boost": 0.15
             }
             
     # Check for transportation/logistics companies
@@ -290,24 +212,15 @@ def check_special_domain_cases(domain: str, text_content: str) -> Optional[Dict[
         logger.warning(f"Domain {domain} contains transportation terms: {found_transport_terms}")
         # Look for confirmation in the content
         transport_content_terms = ["shipping", "logistics", "fleet", "trucking", "transportation", "delivery"]
-        if content_lower and any(term in content_lower for term in transport_content_terms):
+        if any(term in text_content.lower() for term in transport_content_terms):
             logger.warning(f"Content confirms {domain} is likely a transportation/logistics company")
+            # Return enhancement hints, not a complete override
             return {
-                "processing_status": 2,
                 "is_service_business": False,
-                "predicted_class": "Internal IT Department",
-                "internal_it_potential": 60,
-                "confidence_scores": {
-                    "Managed Service Provider": 5,
-                    "Integrator - Commercial A/V": 3,
-                    "Integrator - Residential A/V": 2,
-                    "Internal IT Department": 60
-                },
-                "llm_explanation": f"{domain} appears to be a transportation and logistics company, not an IT or A/V service provider. The website focuses on shipping, transportation, and logistics services rather than technology services or integration. This type of company typically has moderate internal IT needs to manage their operations and fleet management systems.",
-                "company_description": f"{domain} is a transportation and logistics company providing shipping and freight services.",
-                "detection_method": "domain_override",
-                "low_confidence": False,
-                "max_confidence": 0.6
+                "enhancement_type": "domain_industry_hint",
+                "suggested_class": "Internal IT Department",
+                "industry_hint": "transportation_logistics",
+                "confidence_boost": 0.15
             }
             
     return None
