@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 def clean_json_string(json_str: str) -> str:
     """
-    Clean a JSON string by removing control characters and fixing common issues.
+    Clean a JSON string by removing control characters and fixing common Claude issues.
     
     Args:
         json_str: The JSON string to clean
@@ -23,8 +23,18 @@ def clean_json_string(json_str: str) -> str:
     cleaned = re.sub(r',\s*]', ']', cleaned)
     cleaned = re.sub(r',\s*}', '}', cleaned)
     
-    # Fix missing quotes around property names
-    cleaned = re.sub(r'([{,]\s*)(\w+)(\s*:)', r'\1"\2"\3', cleaned)
+    # Fix missing quotes around property names (more comprehensive)
+    cleaned = re.sub(r'([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:', r'\1"\2":', cleaned)
+    
+    # Fix inconsistent comma formats in numeric arrays (like 1,0 which should be 1, 0)
+    cleaned = re.sub(r'(\d+),(\d+)', r'\1, \2', cleaned)
+    
+    # Fix missing commas between object properties
+    cleaned = re.sub(r'(true|false|null|"[^"]*"|\d+\.\d+|\d+)\s*}', r'\1}', cleaned)
+    cleaned = re.sub(r'(true|false|null|"[^"]*"|\d+\.\d+|\d+)\s*]', r'\1]', cleaned)
+    
+    # Fix missing commas between array elements
+    cleaned = re.sub(r'(true|false|null|"[^"]*"|\d+\.\d+|\d+)\s*(true|false|null|"[^"]*"|\d+\.\d+|\d+)', r'\1, \2', cleaned)
     
     # Replace unescaped newlines in strings
     cleaned = re.sub(r'(".*?)\n(.*?")', r'\1\\n\2', cleaned, flags=re.DOTALL)
@@ -36,9 +46,8 @@ def clean_json_string(json_str: str) -> str:
     cleaned = re.sub(r'("\s*)\}(\s*")', r'\1},\2', cleaned)
     cleaned = re.sub(r'("\s*)\](\s*")', r'\1],\2', cleaned)
     
-    # Fix missing commas between values in arrays
-    cleaned = re.sub(r'(true|false|null|"[^"]*"|[\d\.]+)(\s*)("[^"]*"|\{|\[|true|false|null|[\d\.]+)', 
-                    r'\1,\2\3', cleaned)
+    # Fix incorrect comma placement
+    cleaned = re.sub(r'(true|false|null|"[^"]*"|[\d\.]+),\s*(}|])', r'\1\2', cleaned)
     
     # Fix line breaks that might break string literals
     cleaned = re.sub(r'(".*?)(\r\n|\n|\r)(.*?")', r'\1 \3', cleaned, flags=re.DOTALL)
@@ -47,16 +56,17 @@ def clean_json_string(json_str: str) -> str:
     cleaned = cleaned.replace('\ufeff', '')
     
     # Try to fix quotes within quotes in explanation fields by escaping them
-    if '"llm_explanation"' in cleaned:
-        # Complex regex to find the explanation field and properly escape quotes
-        explanation_pattern = r'"llm_explanation"\s*:\s*"(.*?)"(?=,|\s*})'
-        match = re.search(explanation_pattern, cleaned, re.DOTALL)
-        if match:
-            explanation_text = match.group(1)
-            # Escape any unescaped quotes within the explanation
-            fixed_explanation = explanation_text.replace('"', '\\"')
-            # Replace back in the cleaned string
-            cleaned = cleaned.replace(explanation_text, fixed_explanation)
+    if '"llm_explanation"' in cleaned or '"company_description"' in cleaned:
+        # More robust regex to find text fields and properly escape quotes
+        for field in ["llm_explanation", "company_description", "company_one_line"]:
+            field_pattern = fr'"{field}"\s*:\s*"(.*?)"(?=,|\s*}})'
+            match = re.search(field_pattern, cleaned, re.DOTALL)
+            if match:
+                explanation_text = match.group(1)
+                # Escape any unescaped quotes within the explanation
+                fixed_explanation = explanation_text.replace('"', '\\"')
+                # Replace back in the cleaned string
+                cleaned = cleaned.replace(explanation_text, fixed_explanation)
     
     return cleaned
 
