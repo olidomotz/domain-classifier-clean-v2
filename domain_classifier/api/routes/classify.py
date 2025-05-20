@@ -1,4 +1,4 @@
-"""Classification API routes for domain classifier."""
+"""Fixed classify_routes.py to properly integrate special domain handling with LLM."""
 import logging
 import traceback
 from flask import request, jsonify
@@ -20,8 +20,12 @@ from domain_classifier.storage.cache_manager import process_cached_result
 from domain_classifier.utils.text_processing import extract_company_description
 from domain_classifier.storage.result_processor import process_fresh_result
 
-# Import the new API formatter
-from domain_classifier.utils.api_formatter import format_api_response
+# Import the API formatter if available
+try:
+    from domain_classifier.utils.api_formatter import format_api_response
+    has_api_formatter = True
+except ImportError:
+    has_api_formatter = False
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -80,8 +84,6 @@ def check_for_parked_domain(domain: str, url: str) -> Tuple[bool, Dict[str, Any]
         logger.warning(f"Early parked domain check failed: {e}")
         return False, None
 
-"""Modified classify.py fix with logging for deeper diagnostics."""
-
 def register_classify_routes(app, llm_classifier, snowflake_conn):
     """Register domain/email classification related routes."""
     
@@ -96,7 +98,7 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
             data = request.json
             input_value = data.get('url', '').strip()
             
-            # Change default for force_reclassify to True
+            # Change default for force_reclassify to False
             force_reclassify = data.get('force_reclassify', False)
             
             use_existing_content = data.get('use_existing_content', False)
@@ -105,21 +107,10 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
             use_vector_classification = data.get('use_vector_classification', True)
 
             # New option to control response format
-            use_new_format = data.get('use_new_format', True)
-            
-            # CRITICAL CHANGE: Add flag to force LLM classification even with no content
-            force_llm = data.get('force_llm', False)
+            use_new_format = data.get('use_new_format', True) if has_api_formatter else False
             
             if not input_value:
                 return jsonify({"error": "URL or email is required"}), 400
-            
-            # CRITICAL: Add comprehensive diagnostic logging
-            logger.info("="*80)
-            logger.info(f"CLASSIFYING DOMAIN: {input_value}")
-            logger.info(f"force_reclassify: {force_reclassify}")
-            logger.info(f"use_existing_content: {use_existing_content}")
-            logger.info(f"force_llm: {force_llm}")
-            logger.info("="*80)
             
             # Check if input is an email
             is_email = '@' in input_value
@@ -156,7 +147,7 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
             
             # Check for domain override before any other processing
             domain_override = check_domain_override(domain)
-            if domain_override and not force_llm:  # Skip override if force_llm is True
+            if domain_override:
                 # Add email to response if input was an email
                 if email:
                     domain_override["email"] = email
@@ -182,7 +173,7 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                 logger.info(f"Sending override response to client: {domain_override}")
                 
                 # Format the response if requested
-                if use_new_format:
+                if use_new_format and has_api_formatter:
                     return jsonify(format_api_response(domain_override)), 200
                 else:
                     return jsonify(domain_override), 200
@@ -194,7 +185,7 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
             crawler_type = None
             
             # Check for parked domain early
-            if dns_error == "parked_domain" and not force_llm:
+            if dns_error == "parked_domain":
                 logger.info(f"Domain {domain} detected as parked domain during initial DNS check")
                 parked_result = create_parked_domain_result(domain, crawler_type="dns_check_parked")
                 result = process_fresh_result(parked_result, domain, email, url)
@@ -202,87 +193,54 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                 result["classifier_type"] = "early_detection"
                 
                 # Format the response if requested
-                if use_new_format:
+                if use_new_format and has_api_formatter:
                     return jsonify(format_api_response(result)), 200
                 else:
                     return jsonify(result), 200
             
-            # CRITICAL CHANGE: If force_llm is true, skip crawling checks
-            if not force_llm:
-                if not worth_crawling:
-                    logger.warning(f"Domain {domain} is not worth crawling: {dns_error}")
+            if not worth_crawling:
+                logger.warning(f"Domain {domain} is not worth crawling: {dns_error}")
+                error_result = create_error_result(domain, "dns_error" if "DNS" in dns_error else "connection_error", 
+                                                 dns_error, email, crawler_type)
+                error_result["website_url"] = url
+                error_result["final_classification"] = "7-No Website available"
+                
+                # Format the response if requested
+                if use_new_format and has_api_formatter:
+                    return jsonify(format_api_response(error_result)), 503  # Service Unavailable
+                else:
+                    return jsonify(error_result), 503  # Service Unavailable
+            
+            # If domain is worth crawling, do an additional early check for parked domains
+            if worth_crawling:
+                # Add early parked domain detection
+                is_parked, parked_result = check_for_parked_domain(domain, url)
+                if is_parked:
+                    # Create result for the API
+                    from domain_classifier.classifiers.decision_tree import create_parked_domain_result
+                    parked_domain_data = create_parked_domain_result(domain, crawler_type="quick_check_parked")
                     
-                    # CRITICAL CHANGE: If LLM is available and force_llm is set, still try to classify
-                    if llm_classifier:
-                        logger.info(f"Domain {domain} not worth crawling, but attempting LLM classification with minimal info")
-                        classification = llm_classifier.classify(
-                            None,  # No content  
-                            domain,
-                            use_vector_classification=False,
-                            force_llm_classify=True
-                        )
-                        
-                        if classification:
-                            # Process the LLM classification result
-                            result = process_fresh_result(classification, domain, email, url)
-                            result["crawler_type"] = "no_crawl_llm_only"
-                            result["classifier_type"] = "claude-llm-minimal"
-                            
-                            # Ensure result consistency
-                            result = validate_result_consistency(result, domain)
-                            
-                            # Log the response for debugging
-                            logger.info(f"Sending minimal-info LLM classification response for {domain}")
-                            
-                            # Format the response if requested
-                            if use_new_format:
-                                formatted_result = format_api_response(result)
-                                return jsonify(formatted_result), 200
-                            else:
-                                return jsonify(result), 200
+                    # Process the result
+                    result = process_fresh_result(parked_domain_data, domain, email, url)
                     
-                    # Default error handling if not using LLM for minimal classification
-                    error_result = create_error_result(domain, "dns_error" if "DNS" in dns_error else "connection_error", 
-                                                      dns_error, email, crawler_type)
-                    error_result["website_url"] = url
-                    error_result["final_classification"] = "7-No Website available"
+                    # Add to final result
+                    result["crawler_type"] = "quick_check_parked"  
+                    result["classifier_type"] = "early_detection"
                     
                     # Format the response if requested
-                    if use_new_format:
-                        return jsonify(format_api_response(error_result)), 503  # Service Unavailable
+                    if use_new_format and has_api_formatter:
+                        return jsonify(format_api_response(result)), 200
                     else:
-                        return jsonify(error_result), 503  # Service Unavailable
-                
-                # If domain is worth crawling, do an additional early check for parked domains
-                if worth_crawling and not force_llm:
-                    # Add early parked domain detection
-                    is_parked, parked_result = check_for_parked_domain(domain, url)
-                    if is_parked:
-                        # Create result for the API
-                        from domain_classifier.classifiers.decision_tree import create_parked_domain_result
-                        parked_domain_data = create_parked_domain_result(domain, crawler_type="quick_check_parked")
-                        
-                        # Process the result
-                        result = process_fresh_result(parked_domain_data, domain, email, url)
-                        
-                        # Add to final result
-                        result["crawler_type"] = "quick_check_parked"  
-                        result["classifier_type"] = "early_detection"
-                        
-                        # Format the response if requested
-                        if use_new_format:
-                            return jsonify(format_api_response(result)), 200
-                        else:
-                            return jsonify(result), 200
-                
-                if potentially_flaky:
-                    logger.warning(f"Domain {domain} passed basic checks but shows signs of being flaky (resetting connections)")
-                    # We'll still try to crawl, but warn the user that it might be unreliable
-                else:
-                    logger.info(f"DNS check passed for domain: {domain}")
+                        return jsonify(result), 200
+            
+            if potentially_flaky:
+                logger.warning(f"Domain {domain} passed basic checks but shows signs of being flaky (resetting connections)")
+                # We'll still try to crawl, but warn the user that it might be unreliable
+            else:
+                logger.info(f"DNS check passed for domain: {domain}")
             
             # Check for existing classification if not forcing reclassification
-            if not force_reclassify and not force_llm:
+            if not force_reclassify:
                 existing_record = snowflake_conn.check_existing_classification(domain)
                 
                 if existing_record:
@@ -298,7 +256,7 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                     logger.info(f"Sending cached response to client")
                     
                     # Format the response if requested
-                    if use_new_format:
+                    if use_new_format and has_api_formatter:
                         return jsonify(format_api_response(result)), 200
                     else:
                         return jsonify(result), 200
@@ -306,121 +264,88 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
             # Try to get content (either from DB or by crawling)
             content = None
             
-            # CRITICAL CHANGE: Only attempt content retrieval if not force_llm
-            if not force_llm:
-                # If reclassifying or using existing content, try to get existing content first
-                if force_reclassify or use_existing_content:
-                    try:
-                        content = snowflake_conn.get_domain_content(domain)
-                        if content:
-                            logger.info(f"Using existing content for {domain}")
-                            # Set crawler_type for existing content
-                            crawler_type = "existing_content"
-                            
-                            # Add check for parked domain in cached content
-                            from domain_classifier.classifiers.decision_tree import is_parked_domain
-                            if is_parked_domain(content, domain) and not force_llm:
-                                logger.info(f"Detected parked domain from cached content: {domain}")
-                                from domain_classifier.classifiers.decision_tree import create_parked_domain_result
-                                parked_result = create_parked_domain_result(domain, crawler_type="cached_content_parked")
-                                
-                                # Process the parked domain result
-                                result = process_fresh_result(parked_result, domain, email, url)
-                                
-                                # Add crawler_type and classifier_type to ensure they appear at the bottom
-                                result["crawler_type"] = "cached_content_parked"
-                                result["classifier_type"] = "early_detection"
-                                
-                                # Format the response if requested
-                                if use_new_format:
-                                    return jsonify(format_api_response(result)), 200
-                                else:
-                                    return jsonify(result), 200
-                    except Exception as e:
-                        logger.warning(f"Could not get existing content, will crawl instead: {e}")
-                        content = None
-    
-                # If we specifically requested to use existing content but none was found
-                if use_existing_content and not content and not force_llm:
-                    error_result = {
-                        "domain": domain,
-                        "error": "No existing content found",
-                        "predicted_class": "Unknown",
-                        "confidence_score": 0,
-                        "confidence_scores": {
-                            "Managed Service Provider": 0,
-                            "Integrator - Commercial A/V": 0,
-                            "Integrator - Residential A/V": 0,
-                            "Internal IT Department": 0
-                        },
-                        "explanation": f"We could not find previously stored content for {domain}. Please try recrawling instead.",
-                        "low_confidence": True,
-                        "no_existing_content": True,
-                        "website_url": url,
-                        "final_classification": "2-Internal IT",
-                        "crawler_type": "error_handler",
-                        "classifier_type": "error_handler"
-                    }
-                    
-                    # Add email to response if input was an email
-                    if email:
-                        error_result["email"] = email
+            # If reclassifying or using existing content, try to get existing content first
+            if force_reclassify or use_existing_content:
+                try:
+                    content = snowflake_conn.get_domain_content(domain)
+                    if content:
+                        logger.info(f"Using existing content for {domain}")
+                        # Set crawler_type for existing content
+                        crawler_type = "existing_content"
                         
-                    # Format the response if requested
-                    if use_new_format:
-                        return jsonify(format_api_response(error_result)), 404
-                    else:
-                        return jsonify(error_result), 404
-                
-                # If no content yet and we're not using existing content, crawl the website
-                error_type = None
-                error_detail = None
-                
-                if not content and not use_existing_content and not force_llm:
-                    logger.info(f"Crawling website for {domain}")
-                    content, (error_type, error_detail), crawler_type = crawl_website(url)
-                    
-                    # CRITICAL CHANGE: If crawling failed, but we have llm_classifier, still try to classify with minimal info
-                    if not content and llm_classifier:
-                        logger.info(f"Crawling failed, but attempting LLM classification with minimal info for {domain}")
-                        classification = llm_classifier.classify(
-                            None,  # No content
-                            domain, 
-                            use_vector_classification=False,
-                            force_llm_classify=True
-                        )
-                        
-                        if classification:
-                            # Process the LLM classification result
-                            result = process_fresh_result(classification, domain, email, url)
-                            result["crawler_type"] = f"crawl_failed_{error_type}"
-                            result["classifier_type"] = "claude-llm-minimal"
+                        # Add check for parked domain in cached content
+                        from domain_classifier.classifiers.decision_tree import is_parked_domain
+                        if is_parked_domain(content, domain):
+                            logger.info(f"Detected parked domain from cached content: {domain}")
+                            from domain_classifier.classifiers.decision_tree import create_parked_domain_result
+                            parked_result = create_parked_domain_result(domain, crawler_type="cached_content_parked")
                             
-                            # Ensure result consistency
-                            result = validate_result_consistency(result, domain)
+                            # Process the parked domain result
+                            result = process_fresh_result(parked_result, domain, email, url)
                             
-                            # Log the response for debugging
-                            logger.info(f"Sending minimal-info LLM classification response for {domain}")
+                            # Add crawler_type and classifier_type to ensure they appear at the bottom
+                            result["crawler_type"] = "cached_content_parked"
+                            result["classifier_type"] = "early_detection"
                             
                             # Format the response if requested
-                            if use_new_format:
-                                formatted_result = format_api_response(result)
-                                return jsonify(formatted_result), 200
+                            if use_new_format and has_api_formatter:
+                                return jsonify(format_api_response(result)), 200
                             else:
                                 return jsonify(result), 200
-                        
-                    # If we still can't classify with minimal info, return the error
-                    if not content:
-                        error_result = create_error_result(domain, error_type, error_detail, email, crawler_type)
-                        error_result["website_url"] = url
-                        
-                        # Format the response if requested
-                        if use_new_format:
-                            return jsonify(format_api_response(error_result)), 503  # Service Unavailable
-                        else:
-                            return jsonify(error_result), 503  # Service Unavailable
+                except Exception as e:
+                    logger.warning(f"Could not get existing content, will crawl instead: {e}")
+                    content = None
+
+            # If we specifically requested to use existing content but none was found
+            if use_existing_content and not content:
+                error_result = {
+                    "domain": domain,
+                    "error": "No existing content found",
+                    "predicted_class": "Unknown",
+                    "confidence_score": 0,
+                    "confidence_scores": {
+                        "Managed Service Provider": 0,
+                        "Integrator - Commercial A/V": 0,
+                        "Integrator - Residential A/V": 0,
+                        "Internal IT Department": 0
+                    },
+                    "explanation": f"We could not find previously stored content for {domain}. Please try recrawling instead.",
+                    "low_confidence": True,
+                    "no_existing_content": True,
+                    "website_url": url,
+                    "final_classification": "2-Internal IT",
+                    "crawler_type": "error_handler",
+                    "classifier_type": "error_handler"
+                }
+                
+                # Add email to response if input was an email
+                if email:
+                    error_result["email"] = email
+                    
+                # Format the response if requested
+                if use_new_format and has_api_formatter:
+                    return jsonify(format_api_response(error_result)), 404
+                else:
+                    return jsonify(error_result), 404
             
-            # Classify the content
+            # If no content yet and we're not using existing content, crawl the website
+            error_type = None
+            error_detail = None
+            
+            if not content and not use_existing_content:
+                logger.info(f"Crawling website for {domain}")
+                content, (error_type, error_detail), crawler_type = crawl_website(url)
+                
+                if not content:
+                    # CRITICAL CHANGE: If crawling fails but we have a domain name, 
+                    # still try LLM classification with just the domain
+                    logger.info(f"No content for {domain}, attempting LLM classification with domain name only")
+            
+            # Check for special domain cases to enhance LLM classification
+            from domain_classifier.classifiers.decision_tree import check_special_domain_cases
+            special_case_enhancements = check_special_domain_cases(domain, content)
+            
+            # Whether content succeeded or failed, always use the LLM classifier
             if not llm_classifier:
                 error_result = {
                     "domain": domain, 
@@ -446,51 +371,20 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                     error_result["email"] = email
                     
                 # Format the response if requested
-                if use_new_format:
+                if use_new_format and has_api_formatter:
                     return jsonify(format_api_response(error_result)), 500
                 else:
                     return jsonify(error_result), 500
-            
-            # CRITICAL CHANGE: Check for special domain cases and handle as enhancement hints
-            special_case_hints = None
-            try:
-                from domain_classifier.classifiers.decision_tree import check_special_domain_cases
-                special_case_data = check_special_domain_cases(domain, content)
                 
-                # If check_special_domain_cases returns a full classification and not just hints
-                # (as in current implementation), extract key data as hints
-                if special_case_data:
-                    # Detect if it's a complete classification or just hints
-                    is_complete_classification = "processing_status" in special_case_data and "predicted_class" in special_case_data
-                    
-                    if is_complete_classification:
-                        # Convert to hints format
-                        special_case_hints = {
-                            "is_security_company": special_case_data.get("predicted_class") == "Managed Service Provider",
-                            "enhancement_type": "domain_override_converted",
-                            "suggested_class": special_case_data.get("predicted_class"),
-                            "confidence_boost": 0.15
-                        }
-                        
-                        # Log the conversion
-                        logger.warning(f"Converting complete classification to hints for {domain}")
-                    else:
-                        # Already in hints format
-                        special_case_hints = special_case_data
-            except Exception as e:
-                logger.error(f"Error in special domain handling: {e}")
-                special_case_hints = None
-            
-            logger.info(f"Classifying content for {domain} with LLM")
-            
-            # CRITICAL CHANGE: Always pass force_llm_classify=True if force_llm is set
+            # CRITICAL FIX: Always use the LLM classifier, even if content is minimal or missing
+            logger.info(f"Classifying content for {domain}")
             classification = llm_classifier.classify(
-                content, 
-                domain, 
-                use_vector_classification=use_vector_classification,
-                force_llm_classify=force_llm
+                content=content,  # This might be None, but the LLM can still classify based on domain
+                domain=domain, 
+                use_vector_classification=use_vector_classification
             )
             
+            # If classification fails, return an error
             if not classification:
                 error_result = {
                     "domain": domain,
@@ -516,57 +410,67 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                     error_result["email"] = email
                     
                 # Format the response if requested
-                if use_new_format:
+                if use_new_format and has_api_formatter:
                     return jsonify(format_api_response(error_result)), 500
                 else:
                     return jsonify(error_result), 500
-            
-            # CRITICAL CHANGE: Merge LLM classification with special case hints if available
-            if special_case_hints:
-                logger.info(f"Merging special case hints for {domain}")
-                
-                # Apply special case hints to enhance LLM classification
-                if "suggested_class" in special_case_hints and special_case_hints["suggested_class"] == classification["predicted_class"]:
-                    # If the LLM agrees with our hint, boost confidence
-                    if "confidence_boost" in special_case_hints:
-                        boost = special_case_hints["confidence_boost"]
-                        logger.info(f"Boosting confidence by {boost} due to special case match")
-                        # Apply boost to max_confidence
-                        classification["max_confidence"] = min(1.0, classification.get("max_confidence", 0.5) + boost)
-                        
-                        # Also boost the specific class score
-                        if "confidence_scores" in classification:
-                            class_score = classification["confidence_scores"].get(classification["predicted_class"], 0)
-                            if isinstance(class_score, float) and class_score <= 1.0:
-                                classification["confidence_scores"][classification["predicted_class"]] = min(1.0, class_score + boost)
-                            else:
-                                # Score is already in percentage format (1-100)
-                                classification["confidence_scores"][classification["predicted_class"]] = min(100, class_score + int(boost * 100))
-                
-                # Add detection method enhancement
-                if "enhancement_type" in special_case_hints:
-                    classification["detection_method"] = f"{classification.get('detection_method', 'llm_classification')}_with_{special_case_hints['enhancement_type']}"
-                
-                # Add any industry hints for better descriptions later
-                if "industry_hint" in special_case_hints:
-                    classification["industry_hint"] = special_case_hints["industry_hint"]
-                
-                # Log the enhancement
-                logger.info(f"Enhanced classification with special case hints for {domain}")
             
             # Add crawler_type to the classification if available
             if crawler_type:
                 classification["crawler_type"] = crawler_type
             
             # Determine classifier type
-            # CRITICAL CHANGE: Ensure classifer_type reflects LLM usage
             classifier_type = "claude-llm"
-            if force_llm and not content:
-                classifier_type = "claude-llm-minimal"
             classification["classifier_type"] = classifier_type
             
-            # CRITICAL: Log the LLM usage with a clear marker
-            logger.info(f"✅ Successfully used LLM classification for {domain} with classifier_type: {classifier_type}")
+            # CRITICAL FIX: If we have special case enhancements, apply them to the LLM classification
+            if special_case_enhancements:
+                logger.info(f"Enhancing LLM classification with special case data for {domain}")
+                
+                # Add special domain info to detection method
+                classification["detection_method"] = f"llm_with_{special_case_enhancements.get('detection_method', 'special_knowledge')}"
+                
+                # If special case and LLM classification agree, boost confidence
+                if (special_case_enhancements.get("suggested_class") == classification["predicted_class"] and 
+                    "confidence_boost" in special_case_enhancements):
+                    
+                    boost = special_case_enhancements["confidence_boost"]
+                    logger.info(f"Boosting confidence by {boost} due to special case match")
+                    
+                    # Apply to max_confidence
+                    if "max_confidence" in classification:
+                        classification["max_confidence"] = min(0.95, classification["max_confidence"] + boost)
+                    
+                    # Apply to confidence_scores for the specific class
+                    if "confidence_scores" in classification:
+                        pred_class = classification["predicted_class"]
+                        if pred_class in classification["confidence_scores"]:
+                            current_score = classification["confidence_scores"][pred_class]
+                            # If score is 0-1 range
+                            if isinstance(current_score, float) and current_score <= 1.0:
+                                classification["confidence_scores"][pred_class] = min(0.95, current_score + boost)
+                            # If score is 0-100 range
+                            else:
+                                classification["confidence_scores"][pred_class] = min(95, current_score + int(boost * 100))
+            
+            # CRITICAL FIX: Ensure detection_method is not too long for Snowflake
+            if "detection_method" in classification:
+                if len(classification["detection_method"]) > 40:
+                    logger.warning(f"Truncating detection_method for {domain} to fit in Snowflake")
+                    classification["detection_method"] = classification["detection_method"][:40]
+            
+            # CRITICAL FIX: Ensure domain and URL is included in classification
+            if "domain" not in classification:
+                classification["domain"] = domain
+                
+            if "website_url" not in classification:
+                classification["website_url"] = url
+                
+            if email and "email" not in classification:
+                classification["email"] = email
+            
+            # Log the successful classification
+            logger.info(f"✅ LLM classification completed for {domain} - Result: {classification.get('predicted_class', 'Unknown')}")
             
             # Save to Snowflake and Vector DB (always save, even for reclassifications)
             save_to_snowflake(
@@ -601,9 +505,8 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
             logger.info(f"Sending fresh response to client")
             
             # Format the response if requested
-            if use_new_format:
-                formatted_result = format_api_response(result)
-                return jsonify(formatted_result), 200
+            if use_new_format and has_api_formatter:
+                return jsonify(format_api_response(result)), 200
             else:
                 return jsonify(result), 200
             
@@ -623,74 +526,7 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                 error_result["website_url"] = url
                 
             # Format the response if requested
-            use_new_format = data.get('use_new_format', True) if 'data' in locals() else True
-            if use_new_format:
+            if use_new_format and has_api_formatter:
                 return jsonify(format_api_response(error_result)), 500
             else:
                 return jsonify(error_result), 500
-    
-    @app.route('/classify-email', methods=['POST', 'OPTIONS'])
-    def classify_email():
-        """Alias for classify-domain that redirects email classification requests"""
-        # Handle preflight requests
-        if request.method == 'OPTIONS':
-            return '', 204
-        
-        try:
-            data = request.json
-            email = data.get('email', '').strip()
-            
-            if not email:
-                return jsonify({"error": "Email is required"}), 400
-                
-            # Create a new request with the email as URL
-            new_data = {
-                'url': email,
-                'force_reclassify': data.get('force_reclassify', False),
-                'use_existing_content': data.get('use_existing_content', False),
-                'use_vector_classification': data.get('use_vector_classification', True),  # Add vector flag
-                'use_new_format': data.get('use_new_format', True)  # Add format flag
-            }
-            
-            # Forward to classify_domain by calling it directly with the new data
-            from flask import request as flask_request
-            
-            # Store the original json
-            original_json = flask_request.json
-            
-            # Create a class to simulate the request object
-            class RequestProxy:
-                @property
-                def json(self):
-                    return new_data
-                    
-                @property
-                def method(self):
-                    return 'POST'
-            
-            # Replace the request object temporarily
-            temp_request = flask_request
-            request = RequestProxy()
-            
-            try:
-                # Call classify_domain with our proxy request
-                result = classify_domain()
-                return result
-            finally:
-                # Restore the original request
-                request = temp_request
-                
-        except Exception as e:
-            logger.error(f"Error processing email classification request: {e}\n{traceback.format_exc()}")
-            error_type, error_detail = detect_error_type(str(e))
-            error_result = create_error_result("unknown", error_type, error_detail, None, "email_handler")
-            error_result["error"] = str(e)
-            
-            # Format the response
-            use_new_format = data.get('use_new_format', True) if 'data' in locals() else True
-            if use_new_format:
-                return jsonify(format_api_response(error_result)), 500
-            else:
-                return jsonify(error_result), 500
-            
-    return app
