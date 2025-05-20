@@ -1,4 +1,4 @@
-"""Decision tree logic for domain classification."""
+"""Fixed decision_tree.py to use LLM for all cases."""
 import logging
 import re
 from typing import Dict, Any, Optional, Tuple, List
@@ -17,6 +17,7 @@ def is_parked_domain(content: str, domain: str = None) -> bool:
     Returns:
         bool: True if the domain is parked/inactive
     """
+    # [Keep existing implementation - no changes needed]
     if not content:
         logger.info("Domain has no content at all, considering as parked")
         return True
@@ -137,89 +138,53 @@ def check_special_domain_cases(domain: str, text_content: str) -> Optional[Dict[
     """
     Check for special domain cases that need custom handling.
     
-    CRITICAL CHANGE: Return enhancement hints instead of complete classifications.
-    This allows LLM classification to run but enhances the results.
+    CRITICAL CHANGE: Instead of returning a complete classification,
+    return enhancement information that can be applied after LLM classification.
     
     Args:
         domain: The domain name
         text_content: The website content
         
     Returns:
-        Optional[Dict[str, Any]]: Enhancement hints if special case, None otherwise
+        Optional[Dict[str, Any]]: Enhancement info if special case, None otherwise
     """
     domain_lower = domain.lower()
-    content_lower = text_content.lower() if text_content else ""
     
     # Check for cybersafe.sg specifically
     if domain_lower == "cybersafe.sg":
         logger.warning(f"Special handling for known cybersecurity domain: {domain}")
-        # CRITICAL CHANGE: Return hints instead of complete classification
         return {
-            "is_security_company": True,
-            "enhancement_type": "domain_override_hint",
+            "special_domain": True,
             "suggested_class": "Managed Service Provider",
-            "security_focus": "cyber_security",
-            "confidence_boost": 0.2,  # Boost confidence by this amount
-            "industry_hint": "cybersecurity"
+            "industry": "computer & network security",
+            "description_hint": "cybersecurity services provider",
+            "confidence_boost": 0.2,  # How much to boost confidence if LLM agrees
+            "detection_method": "special_domain_knowledge"
         }
         
-    # Check for security-focused domains
-    security_domain_indicators = ['cyber', 'security', 'secure', 'protect', 'defense', 'infosec', 'threat']
-    security_content_indicators = [
-        'cyber security', 'cybersecurity', 'information security', 'network security',
-        'security services', 'security solutions', 'managed security', 'vulnerability',
-        'penetration testing', 'security monitoring', 'threat', 'attack', 'malware',
-        'ransomware', 'firewall', 'intrusion', 'data breach', 'risk assessment',
-        'security operations', 'soc', 'security operations center', 'mssp',
-        'managed security service provider', 'security awareness',
-        'incident response', 'threat intelligence', 'endpoint protection',
-        'zero trust', 'compliance', 'audit', 'protection', 'defend'
-    ]
-    
-    # Check for security indicators in domain name
-    domain_matches = [indicator for indicator in security_domain_indicators if indicator in domain_lower]
-    
-    # Check for security indicators in content
-    content_matches = []
-    if content_lower:
-        content_matches = [indicator for indicator in security_content_indicators if indicator in content_lower]
-    
-    # If we have strong security indicators (domain name AND content matches)
-    if (domain_matches and len(content_matches) >= 2) or (not domain_matches and len(content_matches) >= 4):
-        logger.info(f"Detected security company from domain {domain} and content indicators: {content_matches}")
-        
-        # CRITICAL CHANGE: Return hints instead of complete classification
-        return {
-            "is_security_company": True,
-            "enhancement_type": "security_detection_hint",
-            "suggested_class": "Managed Service Provider",
-            "security_focus": "cyber_security",
-            "confidence_boost": 0.15,
-            "industry_hint": "cybersecurity"
-        }
-    
-    # Check for HostiFi
+    # Check for special domains with known classifications
+    # HostiFi - always MSP
     if "hostifi" in domain_lower:
-        logger.info(f"Special case handling for known MSP domain: {domain}")
-        # CRITICAL CHANGE: Return hints instead of complete classification
+        logger.info(f"Special handling for known MSP domain: {domain}")
         return {
-            "is_service_business": True,
-            "enhancement_type": "domain_override_hint",
-            "suggested_class": "Managed Service Provider", 
-            "service_focus": "network_management",
-            "confidence_boost": 0.2
+            "special_domain": True,
+            "suggested_class": "Managed Service Provider",
+            "industry": "cloud services",
+            "description_hint": "cloud hosting platform for network controllers",
+            "confidence_boost": 0.15,
+            "detection_method": "special_domain_knowledge"
         }
         
     # Special handling for ciao.dk (known problematic vacation rental site)
     if domain_lower == "ciao.dk":
         logger.warning(f"Special handling for known vacation rental domain: {domain}")
-        # CRITICAL CHANGE: Return hints instead of complete classification
         return {
-            "is_service_business": False,
-            "enhancement_type": "domain_override_hint",
+            "special_domain": True,
             "suggested_class": "Internal IT Department",
-            "industry_hint": "travel_and_tourism",
-            "confidence_boost": 0.15
+            "industry": "travel and tourism",
+            "description_hint": "vacation rental and travel booking",
+            "confidence_boost": 0.15,
+            "detection_method": "special_domain_knowledge"
         }
         
     # Check for other vacation/travel-related domains
@@ -228,17 +193,22 @@ def check_special_domain_cases(domain: str, text_content: str) -> Optional[Dict[
     if found_terms:
         logger.warning(f"Domain {domain} contains vacation/travel terms: {found_terms}")
         
-        # Look for confirmation in the content
-        travel_content_terms = ["booking", "accommodation", "stay", "vacation", "holiday", "rental"]
-        if content_lower and any(term in content_lower for term in travel_content_terms):
+        # Look for confirmation in the content if available
+        travel_terms_in_content = False
+        if text_content:
+            content_lower = text_content.lower()
+            travel_content_terms = ["booking", "accommodation", "stay", "vacation", "holiday", "rental"]
+            travel_terms_in_content = any(term in content_lower for term in travel_content_terms)
+            
+        if travel_terms_in_content or len(found_terms) >= 2:
             logger.warning(f"Content confirms {domain} is likely a travel/vacation site")
-            # CRITICAL CHANGE: Return hints instead of complete classification
             return {
-                "is_service_business": False,
-                "enhancement_type": "domain_industry_hint",
+                "special_domain": True,
                 "suggested_class": "Internal IT Department",
-                "industry_hint": "travel_and_tourism",
-                "confidence_boost": 0.15
+                "industry": "travel and tourism",
+                "description_hint": "vacation rental and travel booking",
+                "confidence_boost": 0.15,
+                "detection_method": "domain_pattern_recognition"
             }
             
     # Check for transportation/logistics companies
@@ -246,17 +216,23 @@ def check_special_domain_cases(domain: str, text_content: str) -> Optional[Dict[
     found_transport_terms = [term for term in transport_terms if term in domain_lower]
     if found_transport_terms:
         logger.warning(f"Domain {domain} contains transportation terms: {found_transport_terms}")
-        # Look for confirmation in the content
-        transport_content_terms = ["shipping", "logistics", "fleet", "trucking", "transportation", "delivery"]
-        if content_lower and any(term in content_lower for term in transport_content_terms):
+        
+        # Look for confirmation in the content if available
+        transport_terms_in_content = False
+        if text_content:
+            content_lower = text_content.lower()
+            transport_content_terms = ["shipping", "logistics", "fleet", "trucking", "transportation", "delivery"]
+            transport_terms_in_content = any(term in content_lower for term in transport_content_terms)
+            
+        if transport_terms_in_content or len(found_transport_terms) >= 2:
             logger.warning(f"Content confirms {domain} is likely a transportation/logistics company")
-            # CRITICAL CHANGE: Return hints instead of complete classification
             return {
-                "is_service_business": False,
-                "enhancement_type": "domain_industry_hint",
+                "special_domain": True,
                 "suggested_class": "Internal IT Department",
-                "industry_hint": "transportation_logistics",
-                "confidence_boost": 0.15
+                "industry": "transportation and logistics",
+                "description_hint": "transportation and logistics services",
+                "confidence_boost": 0.15,
+                "detection_method": "domain_pattern_recognition"
             }
             
     return None
@@ -340,6 +316,7 @@ def check_industry_context(content: str, apollo_data: Optional[Dict] = None, ai_
     Returns:
         tuple: (is_service_business, confidence)
     """
+    # [Keep existing implementation - no changes needed]
     # Default to undetermined with low confidence
     is_service = True
     confidence = 0.5
