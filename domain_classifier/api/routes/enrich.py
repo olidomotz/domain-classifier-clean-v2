@@ -17,6 +17,7 @@ from domain_classifier.utils.cross_validator import reconcile_classification
 from domain_classifier.utils.json_utils import ensure_dict, safe_get
 from domain_classifier.utils.domain_utils import extract_domain_from_email, normalize_domain
 from domain_classifier.config.overrides import check_domain_override
+from domain_classifier.utils.text_processing import ensure_classifier_type
 
 # Import the API formatter if available
 try:
@@ -243,16 +244,21 @@ def register_enrich_routes(app, snowflake_conn):
                             # Log important fields
                             if "predicted_class" in response_data:
                                 logger.info(f"Classification result predicted_class: {response_data['predicted_class']}")
+                            
+                            # UPDATED: Don't log warning about missing classifier_type
                             if "classifier_type" in response_data:
                                 logger.info(f"Classifier type used: {response_data['classifier_type']}")
+                            else:
+                                # Don't log a warning if classifier_type isn't found at this stage
+                                # It will be set later in the process
+                                logger.info(f"Note: classifier_type not found in initial result for {domain} - will be set later")
+                            
                             if "detection_method" in response_data:
                                 logger.info(f"Detection method: {response_data['detection_method']}")
                             
                             # Verify we have required fields
                             if "predicted_class" not in response_data or not response_data["predicted_class"]:
                                 logger.warning("predicted_class not found in response data")
-                            if "classifier_type" not in response_data:
-                                logger.warning("classifier_type not found in response data")
                             
                             # CRITICAL VERIFICATION: Check if LLM was used for classification
                             if "classifier_type" in response_data:
@@ -260,8 +266,6 @@ def register_enrich_routes(app, snowflake_conn):
                                     logger.info(f"✅ LLM classification successful for {domain}")
                                 else:
                                     logger.warning(f"⚠️ LLM classifier was not used for {domain}. Using {response_data.get('classifier_type', 'unknown')} instead.")
-                            else:
-                                logger.warning(f"⚠️ No classifier_type found in result for {domain}")
                         else:
                             logger.error("Response JSON is None or empty")
                     except Exception as parse_error:
@@ -542,10 +546,8 @@ def register_enrich_routes(app, snowflake_conn):
             if not classification_result.get('crawler_type') and crawler_type:
                 classification_result['crawler_type'] = crawler_type
                 
-            # CRITICAL CHANGE: Ensure classifier_type explicitly reflects LLM usage
-            if "classifier_type" not in classification_result or "claude-llm" not in classification_result["classifier_type"]:
-                classification_result["classifier_type"] = "claude-llm-enriched"
-                logger.info(f"Setting classifier_type to claude-llm-enriched for {domain}")
+            # UPDATED: Use the ensure_classifier_type helper to avoid warnings
+            classification_result = ensure_classifier_type(classification_result, domain)
             
             # CRITICAL FIX: Truncate detection_method if it's too long for Snowflake
             if "detection_method" in classification_result and len(classification_result["detection_method"]) > 40:
