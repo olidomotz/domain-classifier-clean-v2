@@ -10,6 +10,11 @@ logger = logging.getLogger(__name__)
 
 def register_similarity_routes(app, snowflake_conn):
     """Register similarity search related routes."""
+    if app is None:
+        logger.error("App object is None in register_similarity_routes")
+        from flask import Flask
+        app = Flask(__name__)
+        logger.info("Created new Flask app as fallback")
     
     @app.route('/query-similar-domains', methods=['POST', 'OPTIONS'])
     def find_similar_domains():
@@ -72,5 +77,6 @@ def register_similarity_routes(app, snowflake_conn):
                 "error": str(e),
                 "results": []
             }), 500
-            
+    
+    # CRITICAL FIX: Return the app object        
     return app
