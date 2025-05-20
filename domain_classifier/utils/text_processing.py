@@ -539,3 +539,43 @@ def generate_one_line_description(content: str, predicted_class: str, domain: st
         return f"{domain} is a parked domain with no active business."
     else:  # Internal IT Department / non-service business
         return f"{domain} is a business with internal IT needs."
+
+def ensure_classifier_type(result: dict, domain: str = None, 
+                       default_type: str = "claude-llm-enriched",
+                       log_warning: bool = False) -> dict:
+    """
+    Ensure that classifier_type is set in the result dictionary.
+    
+    Args:
+        result: The result dictionary
+        domain: Optional domain name for logging
+        default_type: Default classifier_type to use
+        log_warning: Whether to log a warning if classifier_type is missing
+        
+    Returns:
+        dict: The result dictionary with classifier_type set
+    """
+    domain_str = f" for {domain}" if domain else ""
+    
+    if "classifier_type" not in result or not result["classifier_type"]:
+        if log_warning:
+            logger.warning(f"No classifier_type found in result{domain_str}")
+        else:
+            logger.info(f"Setting classifier_type to {default_type}{domain_str}")
+            
+        result["classifier_type"] = default_type
+    elif "claude-llm" not in result["classifier_type"]:
+        if log_warning:
+            logger.warning(f"Non-LLM classifier type found: {result['classifier_type']}{domain_str}")
+            
+        # Preserve original type info but ensure LLM is indicated
+        if "enriched" in default_type and "enriched" not in result["classifier_type"]:
+            result["classifier_type"] = f"{result['classifier_type']}-enriched"
+            logger.info(f"Updated classifier_type to {result['classifier_type']}{domain_str}")
+            
+    # Ensure classifier_type is not too long for Snowflake
+    if len(result["classifier_type"]) > 40:
+        result["classifier_type"] = result["classifier_type"][:40]
+        logger.info(f"Truncated classifier_type to {result['classifier_type']}{domain_str}")
+        
+    return result
