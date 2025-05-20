@@ -42,12 +42,8 @@ def fallback_root():
 # Default app is fallback
 app = fallback_app
 
-# Try to import from modular structure, but fall back to old structure if it fails
+# Try to import from modular structure
 try:
-    # Import the app factory
-    from domain_classifier.api.app import create_app
-    logger.info("Successfully imported from modular structure")
-    
     # Create RSA key from base64 environment variable if needed
     if "SNOWFLAKE_KEY_BASE64" in os.environ and "SNOWFLAKE_PRIVATE_KEY_PATH" in os.environ:
         key_path = os.environ.get("SNOWFLAKE_PRIVATE_KEY_PATH", "/workspace/rsa_key.der")
@@ -71,8 +67,13 @@ try:
     elif not "SNOWFLAKE_KEY_BASE64" in os.environ:
         logger.warning("SNOWFLAKE_KEY_BASE64 not set. Snowflake integration will be disabled.")
     
+    # Import the app factory - this needs to be done after the routes/__init__.py and enrich.py fix
+    logger.info("Attempting to import app factory")
+    from domain_classifier.api.app import create_app
+    logger.info("Successfully imported app factory")
+    
     # Create the Flask application
-    logger.info("Creating app using create_app() function")
+    logger.info("Creating app using create_app()")
     new_app = create_app()
     
     # Verify app was created properly
@@ -81,7 +82,13 @@ try:
         logger.info("Successfully created app using modular structure")
     else:
         logger.error("create_app() returned None or invalid app object")
+        raise ValueError("App creation failed, app is None or invalid")
 
+except ImportError as e:
+    logger.error(f"ImportError in modular structure: {e}")
+    logger.error(f"Error details: {traceback.format_exc()}")
+    logger.warning("This is likely a circular import issue between modules")
+    # Continue to fallback mechanism
 except Exception as e:
     logger.error(f"Error using modular structure: {e}")
     logger.error(traceback.format_exc())
@@ -91,20 +98,39 @@ except Exception as e:
         # Check for both possible filenames
         if os.path.exists("api_service_old.py"):
             logger.info("Falling back to old structure (api_service_old.py)")
-            import api_service_old
-            if hasattr(api_service_old, 'app') and api_service_old.app is not None:
-                app = api_service_old.app
-                logger.info("Successfully loaded app from api_service_old.py")
-            else:
-                logger.error("api_service_old.py doesn't contain a valid app")
+            # Update the import to handle the llm_classifier not found error
+            try:
+                # First ensure the llm_classifier module exists by copying from the new structure
+                if not os.path.exists("llm_classifier.py"):
+                    # If the old module doesn't exist, but we have the new one, copy it
+                    logger.info("Creating llm_classifier.py for legacy support")
+                    with open("llm_classifier.py", "w") as f:
+                        f.write("# Legacy adapter\nfrom domain_classifier.classifiers.llm_classifier import LLMClassifier\n")
+                import api_service_old
+                if hasattr(api_service_old, 'app') and api_service_old.app is not None:
+                    app = api_service_old.app
+                    logger.info("Successfully loaded app from api_service_old.py")
+                else:
+                    logger.error("api_service_old.py doesn't contain a valid app")
+            except Exception as import_error:
+                logger.error(f"Error importing api_service_old: {import_error}")
+                
         elif os.path.exists("api_service.py"):
             logger.info("Falling back to old structure (api_service.py)")
-            import api_service
-            if hasattr(api_service, 'app') and api_service.app is not None:
-                app = api_service.app
-                logger.info("Successfully loaded app from api_service.py")
-            else:
-                logger.error("api_service.py doesn't contain a valid app")
+            try:
+                # Similar fix for api_service.py
+                if not os.path.exists("llm_classifier.py"):
+                    logger.info("Creating llm_classifier.py for legacy support")
+                    with open("llm_classifier.py", "w") as f:
+                        f.write("# Legacy adapter\nfrom domain_classifier.classifiers.llm_classifier import LLMClassifier\n")
+                import api_service
+                if hasattr(api_service, 'app') and api_service.app is not None:
+                    app = api_service.app
+                    logger.info("Successfully loaded app from api_service.py")
+                else:
+                    logger.error("api_service.py doesn't contain a valid app")
+            except Exception as import_error:
+                logger.error(f"Error importing api_service: {import_error}")
         else:
             logger.warning("Neither api_service_old.py nor api_service.py found")
             # Keep using the fallback app
@@ -117,7 +143,7 @@ except Exception as e:
 if hasattr(app, 'route') and not any(rule.rule == '/health' for rule in app.url_map.iter_rules()):
     @app.route('/health')
     def health():
-        return jsonify({"status": "ok", "message": "Domain Classifier API is running", "version": "1.0.0"})
+        return jsonify({"status": "ok", "message": "Domain Classifier API is running", "version": "1.0.0"}), 200
 
 # Add a universal error handler
 @app.errorhandler(Exception)
