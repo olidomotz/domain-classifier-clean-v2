@@ -183,7 +183,8 @@ def quick_parked_check(url: str) -> Tuple[bool, Optional[str]]:
                         chunk = next(response.iter_content(2048), None)
                         if not chunk:
                             break
-                        full_content += chunk.decode('utf-8', errors='ignore')
+                        chunk_str = chunk.decode('utf-8', errors='ignore')
+                        full_content += chunk_str
                     
                     from domain_classifier.classifiers.decision_tree import is_parked_domain
                     if is_parked_domain(full_content, domain):
@@ -234,7 +235,8 @@ def quick_parked_check(url: str) -> Tuple[bool, Optional[str]]:
                             chunk = next(response.iter_content(2048), None)
                             if not chunk:
                                 break
-                            full_content += chunk.decode('utf-8', errors='ignore')
+                            chunk_str = chunk.decode('utf-8', errors='ignore')
+                            full_content += chunk_str
                         
                         from domain_classifier.classifiers.decision_tree import is_parked_domain
                         if is_parked_domain(full_content, domain):
@@ -255,8 +257,8 @@ def quick_parked_check(url: str) -> Tuple[bool, Optional[str]]:
 
 def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]], Optional[str]]:
     """
-    IMPROVED: Crawl a website using Direct Crawler first, then ALWAYS try Scrapy before falling back to Apify.
-    This version ensures proper crawler priority, redirect handling, and content selection.
+    Crawl a website using Direct Crawler first, then try Scrapy only if necessary,
+    then Apify as a last resort.
     
     Args:
         url (str): The URL to crawl
@@ -315,72 +317,67 @@ def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optiona
         if direct_content:
             track_crawler_usage(f"direct_{direct_crawler_type}")
         
-        # CRITICAL FIX: ALWAYS try Scrapy next, regardless of direct crawl results
-        logger.info(f"ALWAYS trying Scrapy for {url}, direct crawl got {direct_content_length} chars")
-        scrapy_content, (scrapy_error_type, scrapy_error_detail) = scrapy_crawl(url)
-        scrapy_content_length = len(scrapy_content.strip()) if scrapy_content else 0
-        
-        # Log detailed debug info
-        logger.info(f"Crawler comparison for {domain}: direct={direct_content_length} chars, scrapy={scrapy_content_length} chars")
-        
-        # Check for parked domain indicators in Scrapy content
-        if scrapy_content:
-            from domain_classifier.classifiers.decision_tree import is_parked_domain
-            if is_parked_domain(scrapy_content, domain):
-                logger.info(f"Detected parked domain from Scrapy content: {domain}")
-                return None, ("is_parked", "Domain appears to be parked based on content analysis"), "scrapy_parked_domain"
-        
-        # IMPROVED DECISION LOGIC:
-        # 1. If Scrapy got good content (>150 chars), use it
-        if scrapy_content and scrapy_content_length > 150:
-            logger.info(f"Using Scrapy content: {scrapy_content_length} chars")
-            track_crawler_usage("scrapy_primary")
-            return scrapy_content, (None, None), "scrapy"
-        
-        # 2. If direct got very good content (>500 chars), use it
-        if direct_content and direct_content_length > 500:
-            logger.info(f"Using direct content: {direct_content_length} chars")
-            return direct_content, (None, None), direct_crawler_type
-        
-        # 3. If both got some content, use the longer one
-        if scrapy_content and direct_content:
-            if scrapy_content_length >= direct_content_length:
-                logger.info(f"Using Scrapy content ({scrapy_content_length} chars) over Direct content ({direct_content_length} chars)")
-                track_crawler_usage("scrapy_preferred")
-                return scrapy_content, (None, None), "scrapy_preferred"
-            else:
-                logger.info(f"Using Direct content ({direct_content_length} chars) over Scrapy content ({scrapy_content_length} chars)")
-                return direct_content, (None, None), direct_crawler_type
-        
-        # 4. If only one got any content at all, use it
-        if scrapy_content and scrapy_content_length > 0:
-            logger.info(f"Using minimal Scrapy content ({scrapy_content_length} chars) as only option")
-            track_crawler_usage("scrapy_minimal")
-            return scrapy_content, (None, None), "scrapy_minimal"
+        # CHANGED: Only try Scrapy if direct crawl was unsuccessful or returned minimal content
+        if not direct_content or direct_content_length < 300:
+            logger.info(f"Direct crawl got insufficient content ({direct_content_length} chars), trying Scrapy for {url}")
+            scrapy_content, (scrapy_error_type, scrapy_error_detail) = scrapy_crawl(url)
+            scrapy_content_length = len(scrapy_content.strip()) if scrapy_content else 0
             
-        if direct_content and direct_content_length > 0:
-            logger.info(f"Using minimal Direct content ({direct_content_length} chars) as only option")
+            # Log detailed debug info
+            logger.info(f"Crawler comparison for {domain}: direct={direct_content_length} chars, scrapy={scrapy_content_length} chars")
+            
+            # Check for parked domain indicators in Scrapy content
+            if scrapy_content:
+                from domain_classifier.classifiers.decision_tree import is_parked_domain
+                # Ensure scrapy_content is a string, not a tuple
+                scrapy_content_str = scrapy_content[0] if isinstance(scrapy_content, tuple) else scrapy_content
+                if is_parked_domain(scrapy_content_str, domain):
+                    logger.info(f"Detected parked domain from Scrapy content: {domain}")
+                    return None, ("is_parked", "Domain appears to be parked based on content analysis"), "scrapy_parked_domain"
+            
+            # If Scrapy got good content (>150 chars), use it
+            if scrapy_content and scrapy_content_length > 150:
+                logger.info(f"Using Scrapy content: {scrapy_content_length} chars")
+                track_crawler_usage("scrapy_primary")
+                return scrapy_content, (None, None), "scrapy"
+                
+            # If direct content is better than Scrapy, use direct content
+            if direct_content and direct_content_length > scrapy_content_length:
+                logger.info(f"Using direct content: {direct_content_length} chars")
+                return direct_content, (None, None), direct_crawler_type
+                
+            # If Scrapy got any content at all, use it
+            if scrapy_content and scrapy_content_length > 0:
+                logger.info(f"Using minimal Scrapy content: {scrapy_content_length} chars")
+                track_crawler_usage("scrapy_minimal")
+                return scrapy_content, (None, None), "scrapy_minimal"
+        else:
+            # Direct crawl got good content, use it directly
+            logger.info(f"Direct crawl successful with {direct_content_length} chars, using it without trying Scrapy")
             return direct_content, (None, None), direct_crawler_type
         
-        # 5. ONLY if both direct and Scrapy completely failed, try Apify as absolute last resort
-        logger.info(f"Both Direct and Scrapy failed for {url}, trying Apify fallback")
-        content, (error_type, error_detail) = apify_crawl(url, timeout=40)  # Reduced timeout to speed up processing
-        
-        # Final check for parked domain with Apify content
-        if content:
-            from domain_classifier.classifiers.decision_tree import is_parked_domain
-            if is_parked_domain(content, domain):
-                logger.info(f"Detected parked domain from Apify content: {domain}")
-                return None, ("is_parked", "Domain appears to be parked based on content analysis"), "apify_parked_domain"
-                
-        if content and len(content.strip()) > 100:
-            logger.info(f"Apify crawl successful for {domain}, got {len(content)} characters")
-            track_crawler_usage("apify_last_resort")  # Mark clearly as last resort
-            return content, (None, None), "apify_last_resort"
-        elif content:
-            logger.info(f"Apify got minimal content for {domain}, using it as last resort")
-            track_crawler_usage("apify_minimal")
-            return content, (None, None), "apify_minimal"
+        # If both direct and Scrapy failed, try Apify as absolute last resort
+        if (not direct_content or direct_content_length < 100) and (not 'scrapy_content' in locals() or not scrapy_content):
+            logger.info(f"Both Direct and Scrapy failed for {url}, trying Apify fallback")
+            content, (error_type, error_detail) = apify_crawl(url, timeout=40)  # Reduced timeout to speed up processing
+            
+            # Final check for parked domain with Apify content
+            if content:
+                from domain_classifier.classifiers.decision_tree import is_parked_domain
+                # Ensure content is a string, not a tuple
+                content_str = content[0] if isinstance(content, tuple) else content
+                if is_parked_domain(content_str, domain):
+                    logger.info(f"Detected parked domain from Apify content: {domain}")
+                    return None, ("is_parked", "Domain appears to be parked based on content analysis"), "apify_parked_domain"
+                    
+            if content and len(content.strip()) > 100:
+                logger.info(f"Apify crawl successful for {domain}, got {len(content)} characters")
+                track_crawler_usage("apify_last_resort")  # Mark clearly as last resort
+                return content, (None, None), "apify_last_resort"
+            elif content:
+                logger.info(f"Apify got minimal content for {domain}, using it as last resort")
+                track_crawler_usage("apify_minimal")
+                return content, (None, None), "apify_minimal"
         else:
             # Last attempt - try direct HTTP crawl with higher timeout
             try:
@@ -397,7 +394,14 @@ def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optiona
             except Exception as final_e:
                 logger.warning(f"Final HTTP attempt failed: {final_e}")
                 
-            return None, (error_type or direct_error_type, error_detail or direct_error_detail), None
+        # If everything failed, return error info from the best source
+        error_info = (direct_error_type, direct_error_detail)
+        if 'scrapy_error_type' in locals() and scrapy_error_type:
+            error_info = (scrapy_error_type, scrapy_error_detail)
+        if 'error_type' in locals() and error_type:
+            error_info = (error_type, error_detail)
+            
+        return None, error_info, None
             
     except Exception as e:
         error_type, error_detail = detect_error_type(str(e))
