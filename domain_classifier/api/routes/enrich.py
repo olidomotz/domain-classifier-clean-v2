@@ -29,6 +29,122 @@ except ImportError:
 # Set up logging
 logger = logging.getLogger(__name__)
 
+def clean_json_string(json_str: str) -> str:
+    """
+    Clean a JSON string by removing control characters and fixing common Claude issues.
+    
+    Args:
+        json_str: The JSON string to clean
+        
+    Returns:
+        str: The cleaned JSON string
+    """
+    if not json_str:
+        return json_str
+    
+    # Remove any control characters
+    json_str = re.sub(r'[\x00-\x1F\x7F]', '', json_str)
+    
+    # Fix trailing commas in objects which are invalid in JSON
+    json_str = re.sub(r',\s*}', '}', json_str)
+    
+    # Fix trailing commas in arrays which are invalid in JSON
+    json_str = re.sub(r',\s*]', ']', json_str)
+    
+    # Fix numbers with comma and space (e.g., "10, 0") - CRITICAL for LLM output
+    json_str = re.sub(r'(\d+),\s*(\d+)', r'\1.\2', json_str)
+    
+    # Also handle numbers with just commas as decimal separators (European style)
+    json_str = re.sub(r'(\d+),(\d+)(?=,|\s|"|]|}|$)', r'\1.\2', json_str)
+    
+    # Fix any properties without quotes - find property names without quotes
+    json_str = re.sub(r'(?<={|,)\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*:', r'"\1":', json_str)
+    
+    # Fix any single quoted strings - replace single quotes with double quotes
+    # Only replace single quotes that are likely to be string delimiters
+    json_str = re.sub(r'(?<={|,|\[)\s*\'([^\']+)\'(?=\s*:|,|}|\])', r'"\1"', json_str)
+    
+    # Final check and attempt to fix JSON errors
+    try:
+        json.loads(json_str)
+    except json.JSONDecodeError as e:
+        # Attempt to fix specific issues based on error message and position
+        error_msg = str(e)
+        position = getattr(e, 'pos', None)
+        
+        if position is not None:
+            # Look at the problematic part of the string
+            context_start = max(0, position - 20)
+            context_end = min(len(json_str), position + 20)
+            context = json_str[context_start:context_end]
+            
+            logger.warning(f"JSON decode error at position {position}: {error_msg}")
+            logger.warning(f"Context: '{context}'")
+            
+            # Check for common number format issues
+            if re.search(r'\d+,\s*\d+', context):
+                # Fix specific number format issues in the vicinity of the error
+                fix_range_start = max(0, position - 50)
+                fix_range_end = min(len(json_str), position + 50)
+                part_to_fix = json_str[fix_range_start:fix_range_end]
+                fixed_part = re.sub(r'(\d+),\s*(\d+)', r'\1.\2', part_to_fix)
+                
+                json_str = json_str[:fix_range_start] + fixed_part + json_str[fix_range_end:]
+                logger.info("Applied focused number format fix near error position")
+    
+    return json_str
+
+def ensure_classifier_type(result: dict, domain: str = None, default_type: str = "claude-llm-enriched", log_warning: bool = False) -> dict:
+    """
+    Ensure that classifier_type is set in the result dictionary.
+    
+    Args:
+        result: The result dictionary
+        domain: Optional domain name for logging
+        default_type: Default classifier_type to use
+        log_warning: Whether to log a warning if classifier_type is missing
+        
+    Returns:
+        dict: The result dictionary with classifier_type set
+    """
+    domain_str = f" for {domain}" if domain else ""
+    
+    # Check for API formatter output first
+    if '02_classifier_type' in result:
+        # If we have a formatted result, extract the original classifier_type
+        result['classifier_type'] = result.get('02_classifier_type')
+        logger.info(f"Found classifier_type in formatted result{domain_str}: {result['classifier_type']}")
+        return result
+        
+    # Handle case when classifier_type is missing or empty
+    if "classifier_type" not in result or not result["classifier_type"]:
+        if log_warning:
+            logger.warning(f"No classifier_type found in result{domain_str}")
+        else:
+            logger.info(f"Setting classifier_type to {default_type}{domain_str}")
+        result["classifier_type"] = default_type
+    elif "claude-llm" not in result["classifier_type"]:
+        # Special case for 'pending_classification'
+        if result["classifier_type"] == "pending_classification":
+            logger.info(f"Upgrading pending_classification to {default_type}{domain_str}")
+            result["classifier_type"] = default_type
+        elif log_warning:
+            logger.warning(f"Non-LLM classifier type found: {result['classifier_type']}{domain_str}")
+    else:
+        # Preserve original type info but ensure enriched is indicated if needed
+        if "enriched" in default_type and "enriched" not in result["classifier_type"]:
+            original_type = result["classifier_type"]
+            result["classifier_type"] = f"{original_type}-enriched"
+            logger.info(f"Updated classifier_type to {result['classifier_type']}{domain_str}")
+            
+    # Ensure classifier_type is not too long for Snowflake
+    if len(result["classifier_type"]) > 40:
+        original_length = len(result["classifier_type"])
+        result["classifier_type"] = result["classifier_type"][:40]
+        logger.info(f"Truncated classifier_type from {original_length} to 40 chars{domain_str}")
+    
+    return result
+
 def register_enrich_routes(app, snowflake_conn):
     """Register enrichment related routes."""
     logger.info("Registering enrichment routes")
