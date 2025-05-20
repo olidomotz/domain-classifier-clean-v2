@@ -7,8 +7,7 @@ import logging
 import time
 from flask import Flask, jsonify
 from domain_classifier.api.middleware import setup_cors
-# Import register_all_routes from routes in create_app, not at module level
-# from domain_classifier.api.routes import register_all_routes
+# Import register_all_routes inside create_app function to avoid circular imports
 from domain_classifier.config.settings import get_port
 from domain_classifier.classifiers.llm_classifier import LLMClassifier
 from domain_classifier.storage.snowflake_connector import SnowflakeConnector
@@ -44,7 +43,7 @@ def create_app():
     vector_db_conn = VectorDBConnector()
 
     # Register routes with initialized services
-    # Import here to avoid circular imports
+    # Import register_all_routes here (inside function) to avoid circular imports
     logger.info("Importing route registration function")
     from domain_classifier.api.routes import register_all_routes
     
