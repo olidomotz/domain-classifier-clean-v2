@@ -14,6 +14,7 @@ def reconcile_classification(classification: Dict[str, Any],
                            ai_data: Optional[Dict] = None) -> Dict[str, Any]:
     """
     Cross-validate classification results against metadata from different sources.
+    Optimized for performance.
     
     Args:
         classification: The classification result
@@ -27,70 +28,76 @@ def reconcile_classification(classification: Dict[str, Any],
     if not apollo_data and not ai_data:
         return classification
     
+    # Extract domain for logging
+    domain = classification.get('domain', 'unknown')
+    
+    # Fast path for cybersecurity companies
+    apollo_industry = ''
+    if apollo_data and isinstance(apollo_data, dict) and "industry" in apollo_data:
+        apollo_industry = apollo_data["industry"].lower() if isinstance(apollo_data["industry"], str) else ''
+    
+    # Quick check for security industry - always MSP
+    if 'security' in apollo_industry or 'cyber' in apollo_industry:
+        logger.info(f"Security industry detected for {domain} from Apollo: {apollo_industry}")
+        
+        if classification.get('predicted_class') != "Managed Service Provider":
+            logger.warning(f"Cybersecurity company {domain} was misclassified as {classification.get('predicted_class')}, correcting to MSP")
+            
+            # Override classification quickly
+            classification['predicted_class'] = "Managed Service Provider"
+            classification['is_service_business'] = True
+            classification['confidence_scores'] = {
+                'Managed Service Provider': 85,
+                'Integrator - Commercial A/V': 5,
+                'Integrator - Residential A/V': 5,
+                'Internal IT Department': 0
+            }
+            classification['max_confidence'] = 0.85
+            classification['detection_method'] = "cross_validation_security"
+            
+            # Log success
+            logger.info(f"Reclassified {domain} as Managed Service Provider based on security industry")
+            
+            return classification
+    
+    # Quick check for manufacturing/industrial companies - usually Internal IT
+    industrial_terms = ['manufacturing', 'industrial', 'factory', 'production']
+    if apollo_industry and any(term in apollo_industry for term in industrial_terms):
+        if classification.get('predicted_class') in ["Integrator - Commercial A/V", "Integrator - Residential A/V"]:
+            # Override classification for industrial companies misclassified as AV integrators
+            logger.warning(f"Industrial company with industry '{apollo_industry}' was misclassified as {classification.get('predicted_class')}")
+            classification['predicted_class'] = "Internal IT Department"
+            classification['is_service_business'] = False
+            classification['confidence_scores'] = {
+                'Managed Service Provider': 5,
+                'Integrator - Commercial A/V': 3,
+                'Integrator - Residential A/V': 2,
+                'Internal IT Department': 60
+            }
+            classification['detection_method'] = "cross_validation_industrial"
+            return classification
+    
+    # Fast path for MSPs - we usually don't need to override these
+    if classification.get('predicted_class') == "Managed Service Provider":
+        # Only consider overriding if specifically in manufacturing/transportation
+        if apollo_industry and ('manufacturing' in apollo_industry or 'transport' in apollo_industry):
+            # Continue to detailed check
+            pass
+        else:
+            # Fast return for MSPs with non-contradicting industry data
+            return classification
+    
+    # Now do detailed analysis only for uncertain or contradicting cases
+    
     # Convert to dictionaries if needed
-    apollo_dict = ensure_dict(apollo_data, "apollo_data")
-    ai_dict = ensure_dict(ai_data, "ai_data")
+    apollo_dict = ensure_dict(apollo_data, "apollo_data") if apollo_data else {}
+    ai_dict = ensure_dict(ai_data, "ai_data") if ai_data else {}
     
     # Extract industry information from all sources
-    apollo_industry = ''
-    industry = safe_get(apollo_dict, 'industry', '')
-    if industry is not None:
-        apollo_industry = industry.lower() if isinstance(industry, str) else ''
-    
     ai_industry = ''
     industry = safe_get(ai_dict, 'industry', '')
     if industry is not None:
         ai_industry = industry.lower() if isinstance(industry, str) else ''
-    
-    # Check for security industry specifically - always MSP
-    is_cybersecurity = False
-    if 'security' in apollo_industry or 'cyber' in apollo_industry:
-        is_cybersecurity = True
-        logger.info(f"Security industry detected for {classification.get('domain')} from Apollo: {apollo_industry}")
-    if ai_industry and ('security' in ai_industry or 'cyber' in ai_industry):
-        is_cybersecurity = True
-        logger.info(f"Security industry detected from AI extraction: {ai_industry}")
-    if 'company_description' in classification:
-        desc = classification.get('company_description', '').lower()
-        if 'security' in desc and ('cyber' in desc or 'network' in desc or 'computer' in desc):
-            is_cybersecurity = True
-            logger.info("Security industry detected from company description")
-            
-    # Special handling for cybersecurity companies (should always be MSPs)
-    if is_cybersecurity and classification.get('predicted_class') != "Managed Service Provider":
-        logger.warning(f"Cybersecurity company {classification.get('domain')} was misclassified as {classification.get('predicted_class')}, correcting to MSP")
-        
-        # Override classification
-        classification['predicted_class'] = "Managed Service Provider"
-        classification['is_service_business'] = True
-        
-        # Set appropriate confidence scores
-        classification['confidence_scores'] = {
-            'Managed Service Provider': 85,
-            'Integrator - Commercial A/V': 5,
-            'Integrator - Residential A/V': 5,
-            'Internal IT Department': 0
-        }
-        
-        # Update max_confidence
-        classification['max_confidence'] = 0.85
-        
-        # Update detection_method to indicate cross-validation correction
-        classification['detection_method'] = "cross_validation_security"
-        
-        # Generate a more accurate company description based on industry data
-        company_name = classification.get('company_name', classification.get('domain', '').split('.')[0].capitalize())
-        new_description = f"{company_name} is a cybersecurity services company specializing in protecting organizations from cyber threats."
-        if apollo_dict and apollo_dict.get('employee_count'):
-            new_description += f" With approximately {apollo_dict.get('employee_count')} employees,"
-        new_description += " the company provides services such as security monitoring, threat detection, vulnerability management, and incident response."
-        
-        # Replace the description
-        classification['company_description'] = new_description
-        classification['company_one_line'] = f"{company_name} provides managed cybersecurity services to protect organizations from digital threats."
-        
-        # Return the corrected classification
-        return classification
     
     # Extract employee count (higher counts suggest Internal IT potential)
     employee_count = 0
@@ -106,8 +113,8 @@ def reconcile_classification(classification: Dict[str, Any],
         'manufacturing', 'forging', 'steel', 'industrial', 'factory', 'production',
         'fabrication', 'assembly', 'machining', 'engineering', 'metals', 'construction',
         
-        # Retail & E-commerce - EXCLUDING consumer electronics
-        'retail', 'shop', 'store', 'e-commerce', 'ecommerce', 'online store', 'webshop',
+        # Retail & E-commerce
+        'retail', 'shop', 'store', 'e-commerce', 'ecommerce', 'webshop',
         'marketplace', 'sales', 'dealer', 'distribution',
         
         # Hospitality & Food
@@ -118,40 +125,13 @@ def reconcile_classification(classification: Dict[str, Any],
         'healthcare', 'medical', 'hospital', 'clinic', 'wellness', 'pharmacy',
         'dental', 'health', 'care', 'patient', 'treatment', 'therapy',
         
-        # Education
-        'education', 'school', 'university', 'college', 'academic', 'learning', 
-        'training', 'teaching', 'educational', 'student', 'campus',
-        
         # Transportation & Logistics
         'transportation', 'logistics', 'shipping', 'freight', 'delivery', 'courier',
         'trucking', 'distribution', 'supply chain', 'warehouse', 'storage',
         
         # Maritime & Shipping
         'maritime', 'shipping', 'vessel', 'boat', 'nautical', 'marine', 'cruise',
-        'ferry', 'yacht', 'port', 'harbor', 'offshore', 'naval', 'dock',
-        
-        # Financial & Professional Services
-        'financial', 'banking', 'insurance', 'legal', 'law', 'accounting',
-        'finance', 'investment', 'wealth', 'tax', 'audit', 'advisory', 'consulting',
-        
-        # Agriculture
-        'agriculture', 'farming', 'farm', 'crop', 'livestock', 'dairy',
-        
-        # Real Estate
-        'real estate', 'property', 'properties', 'realty', 'estate', 'housing',
-        'apartment', 'commercial property', 'residential property',
-        
-        # Energy & Utilities
-        'energy', 'oil', 'gas', 'electricity', 'utility', 'power', 'renewable',
-        'solar', 'wind', 'hydro', 'nuclear', 'electric',
-        
-        # Creative & Media
-        'media', 'creative', 'advertising', 'publishing', 'film', 'tv', 'television',
-        'radio', 'entertainment', 'arts', 'design', 'studio',
-        
-        # Government & Non-profit
-        'government', 'public', 'non-profit', 'nonprofit', 'charity', 'foundation',
-        'NGO', 'association', 'organization', 'municipal', 'federal', 'public sector'
+        'ferry', 'yacht', 'port', 'harbor', 'offshore', 'naval', 'dock'
     ]
     
     # Industries that could be BOTH product and service businesses (dual nature)
@@ -173,33 +153,16 @@ def reconcile_classification(classification: Dict[str, Any],
         'technical services'
     ]
     
-    # Terms that strongly indicate AV Integrator services
-    av_integrator_indicators = [
-        'audio visual integration', 'av integration', 'audio visual installations',
-        'conference room design', 'video conferencing installation', 'commercial av',
-        'av systems integrator', 'professional av', 'video wall installation',
-        'digital signage installation', 'av solutions provider', 'av contractor',
-        'theatrical lighting', 'stage lighting', 'sound system installation',
-        'projector installation', 'control system integration', 'classroom technology',
-        'home automation', 'smart home', 'home theater', 'cinema', 'integrated security',
-        'lighting control', 'multi-room audio', 'home entertainment'
-    ]
-    
-    # Check if these strong AV indicators are present in the content description or explanation
-    description_lower = classification.get('company_description', '').lower()
-    explanation_lower = classification.get('explanation', '').lower()
-    
-    has_av_indicators = False
-    av_indicators_found = []
-    for indicator in av_integrator_indicators:
-        if (indicator in description_lower or indicator in explanation_lower):
-            has_av_indicators = True
-            av_indicators_found.append(indicator)
-            logger.info(f"Found AV integrator indicator: '{indicator}'")
-            
-            # If we find at least 2 indicators, that's strong evidence
-            if len(av_indicators_found) >= 2:
-                break
+    # Check specifically for maritime industry contradictions
+    is_maritime = False
+    if 'maritime' in apollo_industry or 'shipping' in apollo_industry or 'vessel' in apollo_industry:
+        is_maritime = True
+    elif ai_industry and ('maritime' in ai_industry or 'shipping' in ai_industry or 'vessel' in ai_industry):
+        is_maritime = True
+    elif 'company_description' in classification:
+        desc = classification.get('company_description', '').lower()
+        if 'maritime' in desc or 'shipping' in desc or 'vessel' in desc:
+            is_maritime = True
     
     # Check if the predicted class is a service business type
     is_service = classification.get('predicted_class') in [
@@ -208,22 +171,12 @@ def reconcile_classification(classification: Dict[str, Any],
         'Integrator - Residential A/V'
     ]
     
-    domain = classification.get('domain', 'unknown')
     source = classification.get('source', '')
     
     # Extract confidence score
     confidence_score = classification.get('confidence_score', 0)
     max_confidence = classification.get('max_confidence', 0.5)
     high_confidence_classification = max_confidence >= 0.7 or confidence_score >= 70
-    
-    # Check specifically for maritime industry contradictions
-    is_maritime = False
-    if 'maritime' in apollo_industry or 'shipping' in apollo_industry or 'vessel' in apollo_industry:
-        is_maritime = True
-    elif ai_industry and ('maritime' in ai_industry or 'shipping' in ai_industry or 'vessel' in ai_industry):
-        is_maritime = True
-    elif 'maritime' in description_lower or 'shipping' in description_lower or 'vessel' in description_lower:
-        is_maritime = True
     
     # Check if this is an IT department being wrongly classified as an AV integrator
     is_likely_internal_it = False
@@ -239,8 +192,11 @@ def reconcile_classification(classification: Dict[str, Any],
         
         # 2. If there's no strong AV indicators in the descriptions, be more skeptical
         # But only if we don't have high confidence in the classification
-        if not has_av_indicators and not high_confidence_classification:
+        if not high_confidence_classification:
             # Check for IT department indicators in the content
+            description_lower = classification.get('company_description', '').lower()
+            explanation_lower = classification.get('explanation', '').lower()
+            
             it_dept_indicators = ['it department', 'it team', 'internal it', 'technical staff', 
                                 'support team', 'helpdesk', 'it support', 'it personnel']
             
@@ -250,16 +206,16 @@ def reconcile_classification(classification: Dict[str, Any],
                     logger.warning(f"Found IT department indicator: '{indicator}' for {domain} classified as AV")
                     break
             
-            # Be skeptical of cached AV classifications with no supporting evidence and no dual-nature industry
-            if source == 'cached' and not has_av_indicators and \
+            # Be skeptical of cached AV classifications with no dual-nature industry
+            if source == 'cached' and \
                (not apollo_industry or not any(term in apollo_industry for term in dual_nature_industries)):
                 # Increase likelihood of being internal IT if industry data present
                 if apollo_industry or ai_industry:
                     is_likely_internal_it = True
-                    logger.warning(f"Cached AV classification with no AV indicators for {domain}, likely Internal IT")
+                    logger.warning(f"Cached AV classification with contradicting industry data for {domain}, likely Internal IT")
     
     # For service businesses, check for contradictions with industry data
-    if is_service and not is_cybersecurity:  # Skip if already identified as cybersecurity
+    if is_service:
         # Check if industry data suggests a non-service business
         # But be careful with dual-nature industries like consumer electronics
         apollo_non_service = apollo_industry and any(term in apollo_industry for term in non_service_industries) and \
@@ -276,50 +232,23 @@ def reconcile_classification(classification: Dict[str, Any],
             should_override = True
             logger.warning(f"Maritime industry detected for {domain} - overriding service business classification")
         
-        # For AV integrators with clear service indicators, DON'T override even if industry is conflicting
-        elif classification.get('predicted_class') in ['Integrator - Commercial A/V', 'Integrator - Residential A/V']:
-            if has_av_indicators:
-                should_override = False
-                logger.info(f"Found strong AV indicators for {domain}, keeping AV classification despite industry data")
-            elif is_likely_internal_it:
-                should_override = True
-                logger.warning(f"Likely internal IT dept being misclassified as AV for {domain}")
-            # If we have high confidence in the classification, don't override
-            elif high_confidence_classification:
-                should_override = False
-                logger.info(f"High confidence ({max_confidence:.2f}) in AV classification for {domain}, keeping despite industry data")
-            # For dual-nature industries like consumer electronics, don't override
-            elif apollo_industry and any(term in apollo_industry for term in dual_nature_industries):
-                should_override = False
-                logger.info(f"Dual-nature industry ({apollo_industry}) detected for {domain}, keeping AV classification")
-        
-        # For Commercial AV without supporting evidence, override
-        elif classification.get('predicted_class') == 'Integrator - Commercial A/V' and is_likely_internal_it:
+        # For AV integrators without supporting evidence, override
+        elif classification.get('predicted_class') in ['Integrator - Commercial A/V', 'Integrator - Residential A/V'] and is_likely_internal_it:
             should_override = True
-            logger.warning(f"Likely internal IT dept being misclassified as Commercial AV for {domain}")
+            logger.warning(f"Likely internal IT dept being misclassified as AV for {domain}")
         
         # For cached results with contradicting Apollo data, be more aggressive
         elif source == 'cached' and apollo_non_service:
-            # But still check for AV indicators before overriding
-            if has_av_indicators:
-                should_override = False
-                logger.info(f"Found AV indicators in cached result for {domain}, keeping classification")
-            else:
-                should_override = True
-                logger.warning(f"Cached classification for {domain} contradicts Apollo industry data, overriding")
+            should_override = True
+            logger.warning(f"Cached classification for {domain} contradicts Apollo industry data, overriding")
         
         # If Apollo and AI both suggest non-service
         elif apollo_non_service and ai_non_service:
-            # But still check for AV indicators before overriding
-            if has_av_indicators:
-                should_override = False
-                logger.info(f"Found AV indicators for {domain}, keeping classification despite industry data")
-            else:
-                should_override = True
-                logger.warning(f"Both Apollo and AI data suggest non-service for {domain}, overriding classification")
+            should_override = True
+            logger.warning(f"Both Apollo and AI data suggest non-service for {domain}, overriding classification")
             
         # If there's a strong non-service signal from Apollo
-        elif apollo_dict and apollo_non_service and not has_av_indicators:
+        elif apollo_dict and apollo_non_service:
             should_override = True
             logger.warning(f"Apollo data strongly suggests non-service for {domain}, overriding classification")
         
@@ -372,9 +301,10 @@ def reconcile_classification(classification: Dict[str, Any],
                     new_description += f" with approximately {employee_count} employees"
                 new_description += "."
                 
-                if "supplies" in description_lower or "parts" in description_lower:
+                company_description = classification.get('company_description', '').lower()
+                if "supplies" in company_description or "parts" in company_description:
                     new_description += " The company provides ship supplies, spare parts, and maritime equipment to vessels."
-                elif "logistics" in description_lower:
+                elif "logistics" in company_description:
                     new_description += " The company offers maritime logistics and shipping services."
                 else:
                     new_description += " The company operates in the maritime industry, providing shipping-related services."
@@ -401,9 +331,10 @@ def reconcile_classification(classification: Dict[str, Any],
                 new_description += "."
                 
                 # Add more context if we can determine it
-                if "products" in description_lower or "manufacturing" in description_lower:
+                company_description = classification.get('company_description', '').lower()
+                if "products" in company_description or "manufacturing" in company_description:
                     new_description += f" The company manufactures or distributes products in the {apollo_industry} industry."
-                elif "services" in description_lower:
+                elif "services" in company_description:
                     new_description += f" The company provides services in the {apollo_industry} sector."
                 
                 # Replace the fabricated description
