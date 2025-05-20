@@ -4,11 +4,9 @@ import logging
 # Set up logging
 logger = logging.getLogger(__name__)
 
-# DO NOT import route modules at the top level - only import them inside the function
-
 def register_all_routes(app, llm_classifier, snowflake_conn, vector_db_conn):
     """Register all routes with the app."""
-    logger.info("Starting route registration process")
+    logger.info("Starting route registration")
     
     if app is None:
         logger.error("App object is None in register_all_routes")
@@ -16,7 +14,7 @@ def register_all_routes(app, llm_classifier, snowflake_conn, vector_db_conn):
         app = Flask(__name__)
         logger.info("Created new Flask app as fallback")
     
-    # Import and register route modules INSIDE this function to avoid circular imports
+    # Import route modules INSIDE this function to avoid circular imports
     from domain_classifier.api.routes.health import register_health_routes
     logger.info("Registering health routes")
     app = register_health_routes(app, llm_classifier, snowflake_conn, vector_db_conn)
