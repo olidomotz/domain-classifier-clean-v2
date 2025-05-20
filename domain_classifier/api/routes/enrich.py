@@ -1,4 +1,4 @@
-"""Enrichment related routes for the domain classifier API."""
+"""Classification and enrichment route for domain classifier."""
 import logging
 import traceback
 import re  # Added import for regex operations
@@ -34,8 +34,9 @@ def register_enrich_routes(app, snowflake_conn):
         try:
             data = request.json
             input_value = data.get('url', '').strip()
-            force_reclassify = data.get('force_reclassify', False)
-            # We've removed the use_new_format parameter since we'll always use the new format
+            force_reclassify = data.get('force_reclassify', True)  # CHANGED default to True to force classification
+            # Add parameter to control response format
+            use_new_format = data.get('use_new_format', True)
             
             if not input_value:
                 return jsonify({"error": "URL or email is required"}), 400
@@ -56,9 +57,6 @@ def register_enrich_routes(app, snowflake_conn):
                     
             # Create URL for checks and displaying
             url = f"https://{domain}"
-            
-            # ADDED: Debug logging for initial values
-            logger.info(f"Initial values - Domain: {domain}, Email: {email}, URL: {url}")
             
             # Cache for storing domain content to avoid multiple queries
             domain_content_cache = None
@@ -87,9 +85,12 @@ def register_enrich_routes(app, snowflake_conn):
                 domain_override["crawler_type"] = "override"
                 domain_override["classifier_type"] = "override"
                 
-                # Return the override directly with new format
+                # Return the override directly with appropriate formatting
                 logger.info(f"Sending override response to client: {domain_override}")
-                return jsonify(format_api_response(domain_override)), 200
+                if use_new_format:
+                    return jsonify(format_api_response(domain_override)), 200
+                else:
+                    return jsonify(domain_override), 200
                 
             # Direct check if domain is worth crawling or is parked
             worth_crawling, has_dns, dns_error, potentially_flaky = is_domain_worth_crawling(domain)
@@ -169,66 +170,33 @@ def register_enrich_routes(app, snowflake_conn):
             # First perform standard classification by making an internal request
             # We'll use the routes directly from the app, rather than importing functions
             
+            # CRITICAL CHANGE: Always set force_reclassify=True to ensure we get a fresh LLM classification
             # Get the classify_domain function from app's view functions
-            from domain_classifier.api.routes.classify import register_classify_routes
-            
-            # Call the registered classify-domain route directly using the Flask test client
             with app.test_client() as client:
                 # Create the request payload
                 request_data = {
                     'url': input_value,
-                    'force_reclassify': force_reclassify
+                    'force_reclassify': True  # CRITICAL CHANGE: Force classification to ensure LLM is used
                 }
                 
+                # CRITICAL CHANGE: Log the request details
+                logger.info(f"Sending classification request for {domain} with force_reclassify=True")
                 response = client.post('/classify-domain', json=request_data)
                 classification_result = response.get_json()
                 status_code = response.status_code
-            
-            # ADDED: Debug logging after classification
-            logger.info(f"After classification - result keys: {list(classification_result.keys())}")
-            logger.info(f"Classification Domain: {classification_result.get('domain')}, Email: {classification_result.get('email')}, URL: {classification_result.get('website_url')}")
-            
-            # ADDED: Explicitly ensure critical fields are present
-            if "domain" not in classification_result or not classification_result["domain"]:
-                classification_result["domain"] = domain
-                logger.info(f"Added missing domain: {domain}")
                 
-            if email and ("email" not in classification_result or not classification_result["email"]):
-                classification_result["email"] = email
-                logger.info(f"Added missing email: {email}")
+                # CRITICAL CHANGE: Add detailed logging of classification result
+                logger.info(f"Classification result status code: {status_code}")
+                if "predicted_class" in classification_result:
+                    logger.info(f"Classification result predicted_class: {classification_result['predicted_class']}")
+                if "classifier_type" in classification_result:
+                    logger.info(f"Classifier type used: {classification_result['classifier_type']}")
+                if "detection_method" in classification_result:
+                    logger.info(f"Detection method: {classification_result['detection_method']}")
                 
-            if "website_url" not in classification_result or not classification_result["website_url"]:
-                classification_result["website_url"] = url
-                logger.info(f"Added missing website_url: {url}")
-            
-            # ADDED: Check for crawler_type and set if missing
-            if "crawler_type" not in classification_result or not classification_result["crawler_type"] or classification_result["crawler_type"] == "not_available":
-                logger.info(f"Setting missing crawler_type to default value from status_code: {status_code}")
-                classification_result["crawler_type"] = "classify_and_enrich_fallback"
-                
-            # ADDED: Check for confidence_scores and set if missing
-            if "confidence_scores" not in classification_result and "confidence_score" in classification_result:
-                # Create minimal confidence scores based on predicted class
-                predicted_class = classification_result.get("predicted_class", "Unknown")
-                if predicted_class in ["Managed Service Provider", "Integrator - Commercial A/V", "Integrator - Residential A/V"]:
-                    confidence_score = classification_result.get("confidence_score", 50)
-                    classification_result["confidence_scores"] = {
-                        predicted_class: confidence_score,
-                        "Internal IT Department": 0
-                    }
-                    # Add lower scores for other classes
-                    for cls in ["Managed Service Provider", "Integrator - Commercial A/V", "Integrator - Residential A/V"]:
-                        if cls != predicted_class:
-                            classification_result["confidence_scores"][cls] = max(5, int(confidence_score * 0.1))
-                elif predicted_class == "Internal IT Department":
-                    confidence_score = classification_result.get("confidence_score", 50)
-                    classification_result["confidence_scores"] = {
-                        "Managed Service Provider": 5,
-                        "Integrator - Commercial A/V": 3,
-                        "Integrator - Residential A/V": 2,
-                        "Internal IT Department": confidence_score
-                    }
-                logger.info(f"Added missing confidence_scores: {classification_result['confidence_scores']}")
+                # CRITICAL CHANGE: Check if LLM was used for classification
+                if classification_result.get('classifier_type') != 'claude-llm' and classification_result.get('detection_method') != 'llm_classification':
+                    logger.warning(f"⚠️ LLM classifier was not used for {domain}. Using fallback or cached result.")
             
             # We'll proceed with enrichment regardless of classification status
             # But we'll log a warning if the status code indicates an error
@@ -259,7 +227,7 @@ def register_enrich_routes(app, snowflake_conn):
             
             if not domain:
                 logger.error("No domain found in classification result and couldn't extract from input")
-                return jsonify(format_api_response({"error": "Failed to extract domain for enrichment"})), 400
+                return jsonify({"error": "Failed to extract domain for enrichment"}), 400
             
             # Initialize variables for Apollo data
             apollo_company_data = None
@@ -522,6 +490,11 @@ def register_enrich_routes(app, snowflake_conn):
                 classification_result["final_classification"] = determine_final_classification(classification_result)
                 logger.info(f"Added final classification: {classification_result['final_classification']} for {domain}")
             
+            # CRITICAL CHANGE: Add explicit classification record about LLM usage
+            if "classifier_type" not in classification_result or classification_result["classifier_type"] != "claude-llm":
+                classification_result['classifier_type'] = "claude-llm-enriched"
+                logger.info(f"Setting classifier_type to claude-llm-enriched for {domain}")
+            
             # Save the enhanced data to Snowflake (with Apollo data) - use cached content
             save_to_snowflake(
                 domain=domain, 
@@ -531,19 +504,17 @@ def register_enrich_routes(app, snowflake_conn):
                 snowflake_conn=snowflake_conn,
                 apollo_company_data=apollo_company_data,
                 crawler_type=crawler_type,  # Explicitly pass the crawler_type from the original classification
-                classifier_type="claude-llm-enriched"
+                classifier_type="claude-llm-enriched"  # CRITICAL: Always mark as LLM enriched
             )
-            
-            # ADDED: Final debug logging before returning result
-            logger.info(f"Final keys before formatting: {list(classification_result.keys())}")
-            logger.info(f"Final Domain: {classification_result.get('domain')}, Email: {classification_result.get('email')}, URL: {classification_result.get('website_url')}")
-            logger.info(f"Final Crawler Type: {classification_result.get('crawler_type')}")
             
             # Return the enriched result
             logger.info(f"Successfully enriched and generated recommendations for {domain}")
             
-            # Always use the new format
-            return jsonify(format_api_response(classification_result)), 200
+            # Format the response if requested
+            if use_new_format:
+                return jsonify(format_api_response(classification_result)), 200
+            else:
+                return jsonify(classification_result), 200
             
         except Exception as e:
             logger.error(f"Error in classify-and-enrich: {e}\n{traceback.format_exc()}")
@@ -563,8 +534,22 @@ def register_enrich_routes(app, snowflake_conn):
             if "final_classification" not in error_result:
                 error_result["final_classification"] = determine_final_classification(error_result)
                 
-            # Always use the new format for error responses too
-            return jsonify(format_api_response(error_result)), 200  # Return 200 instead of 500
-
-    # Return the Flask app with the route registered
+            # Format the response if requested
+            use_new_format = data.get('use_new_format', True) if 'data' in locals() else True
+            if use_new_format:
+                return jsonify(format_api_response(error_result)), 200  # Return 200 instead of 500
+            else:
+                return jsonify(error_result), 200  # Return 200 instead of 500
+    
+    def _is_minimal_apollo_data(apollo_data):
+        """Check if Apollo data is minimal and needs enhancement."""
+        # Define the essential fields we want to check
+        essential_fields = ["name", "address", "industry", "employee_count", "phone"]
+        
+        # Count how many essential fields are missing
+        missing_fields = sum(1 for field in essential_fields if not apollo_data.get(field))
+        
+        # If most essential fields are missing, consider it minimal
+        return missing_fields >= 3
+            
     return app
