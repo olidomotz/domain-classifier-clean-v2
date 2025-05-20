@@ -1,4 +1,4 @@
-"""Enrichment related routes for the domain classifier API."""
+"""Complete fixed enrich.py to properly return app and use LLM classification."""
 import logging
 import traceback
 import re  # Added import for regex operations
@@ -15,8 +15,13 @@ from domain_classifier.utils.domain_analysis import analyze_domain_words
 from domain_classifier.utils.cross_validator import reconcile_classification
 from domain_classifier.utils.json_utils import ensure_dict, safe_get
 from domain_classifier.utils.domain_utils import extract_domain_from_email, normalize_domain
-# Import the API formatter
-from domain_classifier.utils.api_formatter import format_api_response
+
+# Import the API formatter if available
+try:
+    from domain_classifier.utils.api_formatter import format_api_response
+    has_api_formatter = True
+except ImportError:
+    has_api_formatter = False
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -36,7 +41,7 @@ def register_enrich_routes(app, snowflake_conn):
             input_value = data.get('url', '').strip()
             force_reclassify = data.get('force_reclassify', True)  # CHANGED default to True to force classification
             # Add parameter to control response format
-            use_new_format = data.get('use_new_format', True)
+            use_new_format = data.get('use_new_format', True) if has_api_formatter else False
             
             if not input_value:
                 return jsonify({"error": "URL or email is required"}), 400
@@ -93,7 +98,7 @@ def register_enrich_routes(app, snowflake_conn):
                 
                 # Return the override directly with appropriate formatting
                 logger.info(f"Sending override response to client: {domain_override}")
-                if use_new_format:
+                if use_new_format and has_api_formatter:
                     return jsonify(format_api_response(domain_override)), 200
                 else:
                     return jsonify(domain_override), 200
@@ -173,14 +178,17 @@ def register_enrich_routes(app, snowflake_conn):
             except Exception as e:
                 logger.warning(f"Early parked domain check failed in enrichment route: {e}")
             
-            # First perform standard classification using our modified approach
+            # First perform standard classification by making an internal request
+            # We'll use the routes directly from the app, rather than importing functions
+            
+            # Call the registered classify-domain route directly using the Flask test client
             with app.test_client() as client:
                 # Create the request payload
-                # CRITICAL CHANGE: Always force reclassify and force LLM to ensure fresh LLM classification
+                # CRITICAL CHANGE: Always force reclassify and add force_llm to ensure LLM classification
                 request_data = {
                     'url': input_value,
-                    'force_reclassify': True,    # Always force reclassify to avoid cache
-                    'force_llm': True            # CRITICAL: Always force LLM classification
+                    'force_reclassify': True,    # Always force reclassify
+                    'force_llm': True            # Ensure LLM is used for classification
                 }
                 
                 logger.info(f"Sending internal classification request for {domain} with force_reclassify=True and force_llm=True")
@@ -482,6 +490,11 @@ def register_enrich_routes(app, snowflake_conn):
                 classification_result["classifier_type"] = "claude-llm-enriched"
                 logger.info(f"Setting classifier_type to claude-llm-enriched for {domain}")
             
+            # CRITICAL FIX: Truncate detection_method if it's too long for Snowflake
+            if "detection_method" in classification_result and len(classification_result["detection_method"]) > 40:
+                classification_result["detection_method"] = classification_result["detection_method"][:40]
+                logger.warning(f"Truncated detection_method to 40 chars for Snowflake compatibility")
+            
             # Prioritize Apollo data for company name and other fields
             if apollo_company_data and ai_company_data:
                 # Validate and prioritize Apollo data for core fields
@@ -534,7 +547,7 @@ def register_enrich_routes(app, snowflake_conn):
             logger.info(f"Successfully enriched and generated recommendations for {domain}")
             
             # Format the response if requested
-            if use_new_format:
+            if use_new_format and has_api_formatter:
                 return jsonify(format_api_response(classification_result)), 200
             else:
                 return jsonify(classification_result), 200
@@ -559,7 +572,7 @@ def register_enrich_routes(app, snowflake_conn):
                 
             # Format the response if requested
             use_new_format = data.get('use_new_format', True) if 'data' in locals() else True
-            if use_new_format:
+            if use_new_format and has_api_formatter:
                 return jsonify(format_api_response(error_result)), 200  # Return 200 instead of 500
             else:
                 return jsonify(error_result), 200  # Return 200 instead of 500
@@ -574,5 +587,6 @@ def register_enrich_routes(app, snowflake_conn):
         
         # If most essential fields are missing, consider it minimal
         return missing_fields >= 3
-            
+    
+    # CRITICAL FIX: Return the app object
     return app
