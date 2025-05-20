@@ -4,6 +4,8 @@ import logging
 import json
 import re
 import os
+import time
+import traceback
 from typing import Dict, Any, Optional, Tuple, List
 
 from domain_classifier.classifiers.prompt_builder import build_decision_tree_prompt, load_examples_from_knowledge_base
@@ -47,6 +49,22 @@ class LLMClassifier:
         # Initialize metrics tracking
         self.vector_attempts = 0
         self.vector_successes = 0
+        
+        # Cache for examples to avoid reloading
+        self.loaded_examples = None
+        
+        # Performance optimization: Set up a requests session for reuse
+        self.session = requests.Session()
+        
+        # Add a retry adapter with exponential backoff
+        retry_strategy = requests.adapters.Retry(
+            total=3,  # Maximum number of retries
+            backoff_factor=1,  # Will retry in 1, 2, 4 seconds
+            status_forcelist=[429, 500, 502, 503, 504],  # Retry on these status codes
+            allowed_methods=["POST"]  # Only retry POST requests
+        )
+        adapter = requests.adapters.HTTPAdapter(max_retries=retry_strategy)
+        self.session.mount("https://", adapter)
 
     def classify(self, content: str = None, domain: str = None, apollo_data: Optional[Dict] = None, 
                  ai_data: Optional[Dict] = None, use_vector_classification: bool = True, 
@@ -313,29 +331,27 @@ class LLMClassifier:
     
     def classify_with_llm(self, text_content: str = None, domain: str = None) -> Dict[str, Any]:
         """
-        Classify using LLM with whatever information is available.
-        IMPORTANT: This method now works even if text_content is None.
+        Classify using LLM with optimized performance and reliability.
         
         Args:
             text_content: The text content to classify (can be None)
             domain: Domain name for context (required)
             
         Returns:
-            dict: The classification results including predicted class and confidence scores
+            dict: The classification results
         """
         try:
             if not self.api_key:
                 raise ValueError("No API key provided")
                 
-            # Load examples from knowledge base
-            examples = load_examples_from_knowledge_base()
-            
-            # Log knowledge base usage
-            total_examples = sum(len(examples[cat]) for cat in examples)
-            logger.info(f"Loaded {total_examples} examples from knowledge base")
-            
+            # Load examples from knowledge base if not already loaded
+            if self.loaded_examples is None:
+                self.loaded_examples = load_examples_from_knowledge_base()
+                total_examples = sum(len(self.loaded_examples[cat]) for cat in self.loaded_examples)
+                logger.info(f"Loaded {total_examples} examples from knowledge base")
+                
             # Build system prompt with the decision tree approach
-            system_prompt = build_decision_tree_prompt(examples)
+            system_prompt = build_decision_tree_prompt(self.loaded_examples)
                 
             # CRITICAL CHANGE: Create appropriate user prompt based on available data
             if text_content and len(text_content.strip()) > 0:
@@ -354,7 +370,7 @@ Website content to classify: [No content available - the website could not be cr
 
 Please classify this domain based on the domain name alone. Consider typical naming patterns for different business types and what this domain name suggests about the company's line of business."""
                 
-            # Create the request to the Claude API
+            # Create the request to the Claude API with optimized settings
             url = "https://api.anthropic.com/v1/messages"
             headers = {
                 "x-api-key": self.api_key,
@@ -372,10 +388,13 @@ Please classify this domain based on the domain name alone. Consider typical nam
                 "temperature": 0.1
             }
             
-            # Make the request to Claude
+            # Make the request to Claude using the reused session
             logger.info(f"Making request to Claude API for domain {domain or 'unknown'}")
-            response = requests.post(url, headers=headers, json=data, timeout=60)
+            start_time = time.time()
+            response = self.session.post(url, headers=headers, json=data, timeout=60)
             response_data = response.json()
+            elapsed = time.time() - start_time
+            logger.info(f"Claude API request completed in {elapsed:.2f} seconds")
             
             if "error" in response_data:
                 logger.error(f"Error from Claude API: {response_data['error']}")
@@ -395,7 +414,22 @@ Please classify this domain based on the domain name alone. Consider typical nam
             if json_str:
                 try:
                     # Try to parse the JSON
-                    parsed_json = json.loads(clean_json_string(json_str))
+                    cleaned_json_str = clean_json_string(json_str)
+                    logger.info(f"Cleaned JSON string for parsing: {cleaned_json_str[:100]}...")
+                    
+                    try:
+                        parsed_json = json.loads(cleaned_json_str)
+                    except json.JSONDecodeError as e:
+                        logger.error(f"JSON decode error: {str(e)} at position {e.pos}")
+                        logger.error(f"Character at position {e.pos}: '{cleaned_json_str[max(0, e.pos-10):min(len(cleaned_json_str), e.pos+10)]}'")
+                        # Try an even more aggressive cleaning approach
+                        ultra_clean = re.sub(r'[^\x20-\x7E]', '', cleaned_json_str)
+                        try:
+                            parsed_json = json.loads(ultra_clean)
+                            logger.info("JSON parsed successfully after ultra cleaning")
+                        except:
+                            # If that still fails, raise the original error
+                            raise e
                     
                     # Validate and normalize the parsed JSON
                     parsed_json = validate_classification(parsed_json, domain)
