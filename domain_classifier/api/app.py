@@ -7,18 +7,11 @@ import logging
 import time
 import traceback
 from flask import Flask, jsonify, request
-from domain_classifier.api.middleware import setup_cors
+from domain_classifier.api.middleware import setup_cors, setup_performance_monitoring  # Import both from middleware
 from domain_classifier.config.settings import get_port
 from domain_classifier.classifiers.llm_classifier import LLMClassifier
 from domain_classifier.storage.snowflake_connector import SnowflakeConnector
 from domain_classifier.storage.vector_db import VectorDBConnector
-
-# Import performance monitoring middleware
-try:
-    from domain_classifier.api.middleware.performance import setup_performance_monitoring
-    HAS_PERFORMANCE_MONITORING = True
-except ImportError:
-    HAS_PERFORMANCE_MONITORING = False
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -37,11 +30,10 @@ def create_app():
         app = setup_cors(app)
         logger.info("CORS middleware set up successfully")
         
-        # Set up performance monitoring if available
-        if HAS_PERFORMANCE_MONITORING:
-            logger.info("Setting up performance monitoring")
-            app = setup_performance_monitoring(app)
-            logger.info("Performance monitoring set up successfully")
+        # Set up performance monitoring
+        logger.info("Setting up performance monitoring middleware")
+        app = setup_performance_monitoring(app)
+        logger.info("Performance monitoring set up successfully")
 
         # Initialize services
         logger.info("Initializing LLM classifier")
