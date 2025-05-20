@@ -1,4 +1,3 @@
-
 """
 Enhanced Scrapy crawler implementation for domain classification.
 This module replaces the existing scrapy_crawler.py with improved capabilities for content extraction.
@@ -875,61 +874,86 @@ class EnhancedScrapyCrawler:
                 domain = domain[4:]
             
             # Create crawler instance and scrape
-            crawler = EnhancedScrapyCrawler()
-            content = crawler.scrape(url)
+            try:
+                self._run_spider(url)
+            except Exception as e:
+                logger.error(f"Error running spider: {e}")
+                logger.error(traceback.format_exc())
+                return None, ("spider_error", str(e))
             
-            # Log the content length for better diagnostics
-            content_length = len(content) if content else 0
-            logger.info(f"Scrapy crawl for {domain} returned {content_length} characters")
+            # Parse and combine results
+            combined_content = ""
             
-            # Check for parked domain indicators in content before proceeding
-            if content:
-                from domain_classifier.classifiers.decision_tree import is_parked_domain
-                if is_parked_domain(content, domain):
-                    logger.info(f"Detected parked domain from enhanced Scrapy content: {domain}")
-                    return None, ("is_parked", "Domain appears to be parked based on content analysis")
+            # Look for homepage content first
+            homepage_fragments = [r for r in self.results if r.get('is_homepage', False)]
+            
+            if homepage_fragments:
+                # Sort by content length (we want the longest content)
+                homepage_fragments.sort(key=lambda x: len(x.get('content', "")), reverse=True)
+                best_fragment = homepage_fragments[0]
+                combined_content = best_fragment.get('content', "")
+                logger.info(f"Using homepage content: {len(combined_content)} characters")
+                
+                # If it's empty, check if there's raw HTML we can use
+                if not combined_content and best_fragment.get('raw_html'):
+                    # Clean HTML
+                    html = best_fragment.get('raw_html', "")
+                    clean_html = re.sub(r'<script.*?>.*?</script>', ' ', html, flags=re.DOTALL)
+                    clean_html = re.sub(r'<style.*?>.*?</style>', ' ', clean_html, flags=re.DOTALL)
+                    clean_html = re.sub(r'<[^>]+>', ' ', clean_html)
+                    clean_html = re.sub(r'\s+', ' ', clean_html).strip()
                     
-                # Check for proxy errors or hosting provider mentions that indicate parked domains
-                if len(content.strip()) < 300 and any(phrase in content.lower() for phrase in 
-                                                   ["proxy error", "error connecting", "godaddy", 
-                                                    "domain registration", "hosting provider", "buy this domain"]):
-                    logger.info(f"Domain {domain} appears to be parked based on proxy errors or hosting mentions")
-                    return None, ("is_parked", "Domain appears to be parked with a domain registrar")
-            
-            # CRITICAL FIX: Return content even if it's minimal - Apify fallback will handle cases where truly needed
-            if content:
-                # Any content is better than falling back to Apify which takes a very long time
-                logger.info(f"Enhanced Scrapy crawl successful, got {len(content)} characters")
-                return content, (None, None)
+                    combined_content = clean_html
+                    logger.info(f"Using cleaned homepage raw HTML: {len(combined_content)} characters")
             else:
-                # No content at all
-                logger.warning(f"Enhanced Scrapy crawl returned no content for {domain}")
-                
-                # Try a direct crawl as backup to check for parked domain
-                try:
-                    from domain_classifier.crawlers.direct_crawler import direct_crawl
-                    direct_content, _, _ = direct_crawl(url, timeout=5.0)
+                # If no homepage fragments, combine all fragments sorted by length
+                if self.results:
+                    self.results.sort(key=lambda x: len(x.get('content', "")), reverse=True)
+                    # Take content from top 3 fragments
+                    for fragment in self.results[:3]:
+                        fragment_content = fragment.get('content', "")
+                        if fragment_content:
+                            if combined_content:
+                                combined_content += "\n\n"
+                            combined_content += fragment_content
                     
-                    # Check the direct content for parked domain indicators
-                    if direct_content:
-                        from domain_classifier.classifiers.decision_tree import is_parked_domain
-                        if is_parked_domain(direct_content, domain):
-                            logger.info(f"Detected parked domain from direct content: {domain}")
-                            return None, ("is_parked", "Domain appears to be parked based on content analysis")
-                        
-                        # If direct crawl got content, return it instead of falling back to Apify
-                        if len(direct_content) > 100:
-                            logger.info(f"Direct crawl succeeded with {len(direct_content)} characters")
-                            return direct_content, (None, None)
-                except Exception as direct_err:
-                    logger.warning(f"Direct crawl failed for parked check: {direct_err}")
+                    logger.info(f"Combined content from {min(3, len(self.results))} fragments: {len(combined_content)} characters")
                 
-                return None, ("minimal_content", "Website returned minimal or no content")
+                # If no content in fragments, check raw HTML
+                if not combined_content and self.results and self.results[0].get('raw_html'):
+                    # Clean HTML from first result
+                    html = self.results[0].get('raw_html', "")
+                    clean_html = re.sub(r'<script.*?>.*?</script>', ' ', html, flags=re.DOTALL)
+                    clean_html = re.sub(r'<style.*?>.*?</style>', ' ', clean_html, flags=re.DOTALL)
+                    clean_html = re.sub(r'<[^>]+>', ' ', clean_html)
+                    clean_html = re.sub(r'\s+', ' ', clean_html).strip()
+                    
+                    combined_content = clean_html
+                    logger.info(f"Using cleaned raw HTML: {len(combined_content)} characters")
+            
+            # If we got content, check if it's a parked domain
+            if combined_content:
+                # Ensure combined_content is a string, not a tuple
+                # FIX: This is the main issue - if combined_content is a tuple, convert to string
+                if isinstance(combined_content, tuple):
+                    logger.warning(f"Content is a tuple, converting to string")
+                    combined_content = combined_content[0] if combined_content else ""
                 
+                # Now safely check if it's a parked domain
+                from domain_classifier.classifiers.decision_tree import is_parked_domain
+                # FIX: Ensure we're passing a string, not a tuple
+                content_str = combined_content
+                if is_parked_domain(content_str, domain):
+                    logger.info(f"Detected parked domain for {domain}")
+                    return None, ("is_parked", "Domain appears to be parked based on content analysis")
+            
+            return combined_content, (None, None)
+            
         except Exception as e:
             from domain_classifier.crawlers.apify_crawler import detect_error_type
             error_type, error_detail = detect_error_type(str(e))
-            logger.error(f"Error in Enhanced Scrapy crawler: {e} (Type: {error_type})")
+            logger.error(f"Error in Enhanced Scrapy crawler: {e}")
+            logger.error(traceback.format_exc())
             return None, (error_type, error_detail)
 
 
@@ -958,55 +982,48 @@ def scrapy_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional
         crawler = EnhancedScrapyCrawler()
         content = crawler.scrape(url)
         
-        # Log the content length for better diagnostics
-        content_length = len(content) if content else 0
-        logger.info(f"Scrapy crawl for {domain} returned {content_length} characters")
-        
-        # Check for parked domain indicators in content before proceeding
-        if content:
-            from domain_classifier.classifiers.decision_tree import is_parked_domain
-            if is_parked_domain(content, domain):
-                logger.info(f"Detected parked domain from enhanced Scrapy content: {domain}")
-                return None, ("is_parked", "Domain appears to be parked based on content analysis")
-                
-            # Check for proxy errors or hosting provider mentions that indicate parked domains
-            if len(content.strip()) < 300 and any(phrase in content.lower() for phrase in 
-                                               ["proxy error", "error connecting", "godaddy", 
-                                                "domain registration", "hosting provider", "buy this domain"]):
-                logger.info(f"Domain {domain} appears to be parked based on proxy errors or hosting mentions")
-                return None, ("is_parked", "Domain appears to be parked with a domain registrar")
-        
-        # CRITICAL FIX: Return content even if it's minimal - Apify fallback will handle cases where truly needed
-        if content:
-            # Any content is better than falling back to Apify which takes a very long time
-            logger.info(f"Enhanced Scrapy crawl successful, got {len(content)} characters")
-            return content, (None, None)
+        # FIX: Handle the result properly based on what scrape() returns
+        # The scrape() function returns a tuple of (content, (error_type, error_detail))
+        if isinstance(content, tuple) and len(content) == 2:
+            content_text, error_info = content
+            
+            # Log the content length for better diagnostics
+            content_length = len(content_text) if content_text else 0
+            logger.info(f"Scrapy crawl for {domain} returned {content_length} characters")
+            
+            # Check for parked domain indicators in content before proceeding
+            if content_text:
+                from domain_classifier.classifiers.decision_tree import is_parked_domain
+                # FIX: Ensure we're passing a string, not a tuple
+                content_str = content_text
+                if is_parked_domain(content_str, domain):
+                    logger.info(f"Detected parked domain from enhanced Scrapy content: {domain}")
+                    return None, ("is_parked", "Domain appears to be parked based on content analysis")
+                    
+                # Check for proxy errors or hosting provider mentions that indicate parked domains
+                if len(content_str.strip()) < 300 and any(phrase in content_str.lower() for phrase in 
+                                                   ["proxy error", "error connecting", "godaddy", 
+                                                    "domain registration", "hosting provider", "buy this domain"]):
+                    logger.info(f"Domain {domain} appears to be parked based on proxy errors or hosting mentions")
+                    return None, ("is_parked", "Domain appears to be parked with a domain registrar")
+            
+            # CRITICAL FIX: Return content even if it's minimal - Apify fallback will handle cases where truly needed
+            if content_text:
+                # Any content is better than falling back to Apify which takes a very long time
+                logger.info(f"Enhanced Scrapy crawl successful, got {len(content_text)} characters")
+                return content_text, (None, None)
+            else:
+                # No content at all, use the error info
+                logger.warning(f"Enhanced Scrapy crawl returned no content for {domain}")
+                return None, error_info
         else:
-            # No content at all
-            logger.warning(f"Enhanced Scrapy crawl returned no content for {domain}")
-            
-            # Try a direct crawl as backup to check for parked domain
-            try:
-                from domain_classifier.crawlers.direct_crawler import direct_crawl
-                direct_content, _, _ = direct_crawl(url, timeout=5.0)
+            # For backwards compatibility, handle the case where content isn't a tuple
+            logger.warning(f"Unexpected return type from scrape(): {type(content)}")
+            if content:
+                return content, (None, None)
+            else:
+                return None, ("unexpected_error", "Unexpected result format from scraper")
                 
-                # Check the direct content for parked domain indicators
-                if direct_content:
-                    from domain_classifier.classifiers.decision_tree import is_parked_domain
-                    if is_parked_domain(direct_content, domain):
-                        logger.info(f"Detected parked domain from direct content: {domain}")
-                        return None, ("is_parked", "Domain appears to be parked based on content analysis")
-                    
-                    # If direct crawl got content, return it instead of falling back to Apify
-                    if len(direct_content) > 100:
-                        logger.info(f"Direct crawl succeeded with {len(direct_content)} characters")
-                        return direct_content, (None, None)
-                    
-            except Exception as direct_err:
-                logger.warning(f"Direct crawl failed for parked check: {direct_err}")
-            
-            return None, ("minimal_content", "Website returned minimal or no content")
-            
     except Exception as e:
         from domain_classifier.crawlers.apify_crawler import detect_error_type
         error_type, error_detail = detect_error_type(str(e))
