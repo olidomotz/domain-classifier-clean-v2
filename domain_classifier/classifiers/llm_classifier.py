@@ -17,12 +17,11 @@ from domain_classifier.classifiers.decision_tree import (
     check_industry_context
 )
 from domain_classifier.utils.text_processing import (
-    extract_json,
-    clean_json_string,
     detect_minimal_content,
     generate_one_line_description,
     extract_company_description
 )
+from domain_classifier.utils.json_parser import extract_json_from_text, clean_json_string, parse_and_validate_json, extract_predicted_class_from_text
 from domain_classifier.classifiers.result_validator import validate_classification, check_confidence_alignment, ensure_step_format
 from domain_classifier.classifiers.fallback_classifier import fallback_classification, parse_free_text
 from domain_classifier.utils.domain_analysis import analyze_domain_words
@@ -400,123 +399,6 @@ class LLMClassifier:
         except Exception as e:
             logger.error(f"Error in vector-based classification: {e}")
             return None
-    
-    def _improved_clean_json_string(self, json_str: str) -> str:
-        """
-        Enhanced version of clean_json_string that handles numbers with commas.
-        
-        Args:
-            json_str: The JSON string to clean
-            
-        Returns:
-            str: The cleaned JSON string
-        """
-        # Save original for debugging
-        original = json_str
-        
-        # First, fix json strings that may have been escaped
-        json_str = re.sub(r'\\n', '\n', json_str)
-        json_str = re.sub(r'\\\"', '\"', json_str)
-        json_str = re.sub(r'\\"', '\"', json_str)
-        
-        # Fix numbers with commas - patterns like "90, 0" should be "90"
-        # This regex finds patterns like: "key": X, 0 or "key": X,0
-        json_str = re.sub(r'": (\d+),\s*0([,}])', r'": \1\2', json_str)
-        
-        # Fix JSON with wrapped quotation marks
-        if json_str.startswith('"') and json_str.endswith('"'):
-            try:
-                # Try to parse as JSON-escaped string
-                unescaped = json.loads(json_str)
-                if isinstance(unescaped, str) and unescaped.startswith('{') and unescaped.endswith('}'):
-                    json_str = unescaped
-            except:
-                # If that fails, just strip the quotes directly
-                if json_str.startswith('"') and json_str.endswith('"'):
-                    json_str = json_str[1:-1]
-        
-        # Remove any invalid characters
-        json_str = re.sub(r'[^\x20-\x7E]', '', json_str)
-        
-        # Fix missing quotes around keys
-        json_str = re.sub(r'([{,])\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*:', r'\1"\2":', json_str)
-        
-        # Fix trailing commas in objects/arrays which are invalid JSON
-        json_str = re.sub(r',\s*}', '}', json_str)
-        json_str = re.sub(r',\s*\]', ']', json_str)
-        
-        # Fix double colons
-        json_str = re.sub(r'::', r':', json_str)
-        
-        # Fix missing quotes around string values for known fields
-        for field in ["predicted_class", "detection_method", "llm_explanation", "company_description"]:
-            json_str = re.sub(
-                r'"{0}":\s*([^"{{\[\d][^,}}]+)([,}}])'.format(field),
-                r'"{0}": "\1"\2'.format(field),
-                json_str
-            )
-        
-        # If the string is significantly different, log it
-        if original != json_str:
-            logger.info(f"Original JSON: {original[:100]}...")
-            logger.info(f"Cleaned JSON: {json_str[:100]}...")
-        
-        return json_str
-    
-    def _improved_extract_predicted_class(self, text_response: str) -> Optional[str]:
-        """
-        Extract predicted class directly from text response when JSON parsing fails.
-        
-        Args:
-            text_response: The raw text response from the LLM
-            
-        Returns:
-            str: The extracted predicted class or None if not found
-        """
-        # First, try to find a JSON-like predicted_class field
-        class_match = re.search(r'"predicted_class"\s*:\s*"([^"]+)"', text_response)
-        if class_match:
-            return class_match.group(1)
-            
-        # Try alternative patterns
-        alt_match = re.search(r'predicted_class["\s:]*([A-Za-z\s\-]+)[",}]', text_response)
-        if alt_match:
-            return alt_match.group(1).strip()
-            
-        # Look for specific class mentions
-        class_types = [
-            "Managed Service Provider",
-            "Integrator - Commercial A/V", 
-            "Integrator - Residential A/V",
-            "Internal IT Department"
-        ]
-        
-        # Check for phrases like "I classify this as X" or "This is an X"
-        for class_type in class_types:
-            patterns = [
-                rf"classified as (?:a |an )?{class_type}",
-                rf"is (?:a |an )?{class_type}",
-                rf"appears to be (?:a |an )?{class_type}",
-                rf"identified as (?:a |an )?{class_type}"
-            ]
-            for pattern in patterns:
-                if re.search(pattern, text_response, re.IGNORECASE):
-                    return class_type
-                    
-        # Check for specific MSP indicators when we're unsure
-        msp_indicators = [
-            r"provides (IT|technology) services to (other|multiple|various) (companies|businesses|organizations)",
-            r"offers managed (IT|technology|service) to clients",
-            r"managed service provider",
-            r"provides managed (IT|tech|services)",
-            r"IT service provider"
-        ]
-        
-        for indicator in msp_indicators:
-            if re.search(indicator, text_response, re.IGNORECASE):
-                return "Managed Service Provider"
-                
-        return None
 
     def classify_with_llm(self, text_content: str = None, domain: str = None) -> Dict[str, Any]:
         """
@@ -542,7 +424,7 @@ class LLMClassifier:
             # Build system prompt with the decision tree approach
             system_prompt = build_decision_tree_prompt(self.loaded_examples)
                 
-            # CRITICAL CHANGE: Create appropriate user prompt based on available data
+            # Create appropriate user prompt based on available data
             if text_content and len(text_content.strip()) > 0:
                 # Limit the text content to avoid token limits
                 max_chars = 12000
@@ -598,51 +480,13 @@ Please classify this domain based on the domain name alone. Consider typical nam
                 raise Exception("No content in Claude response")
                 
             # Try to extract JSON from the response
-            json_str = extract_json(text_response)
+            json_str = extract_json_from_text(text_response)
             
             if json_str:
-                try:
-                    # Try to parse the JSON with our enhanced cleaner
-                    cleaned_json_str = self._improved_clean_json_string(json_str)
-                    logger.info(f"Cleaned JSON string for parsing: {cleaned_json_str[:100]}...")
-                    
-                    try:
-                        parsed_json = json.loads(cleaned_json_str)
-                    except json.JSONDecodeError as e:
-                        logger.error(f"JSON decode error: {str(e)} at position {e.pos}")
-                        logger.error(f"Character at position {e.pos}: '{cleaned_json_str[max(0, e.pos-10):min(len(cleaned_json_str), e.pos+10)]}'")
-                        
-                        # Try an even more aggressive cleaning approach
-                        ultra_clean = re.sub(r'[^\x20-\x7E]', '', cleaned_json_str)
-                        try:
-                            parsed_json = json.loads(ultra_clean)
-                            logger.info("JSON parsed successfully after ultra cleaning")
-                        except:
-                            # Extract predicted class from text as a last resort
-                            predicted_class = self._improved_extract_predicted_class(text_response)
-                            if predicted_class:
-                                logger.info(f"Extracted predicted class directly from text: {predicted_class}")
-                                # Create a simplified result with the extracted class
-                                parsed_json = {
-                                    "processing_status": 2,  # Success
-                                    "predicted_class": predicted_class,
-                                    "is_service_business": predicted_class != "Internal IT Department",
-                                    "detection_method": "text_extraction_fallback",
-                                    "low_confidence": True,
-                                    "max_confidence": 0.5,  # Medium confidence since we had to extract
-                                    "confidence_scores": {
-                                        "Managed Service Provider": 70 if predicted_class == "Managed Service Provider" else 10,
-                                        "Integrator - Commercial A/V": 70 if predicted_class == "Integrator - Commercial A/V" else 10,
-                                        "Integrator - Residential A/V": 70 if predicted_class == "Integrator - Residential A/V" else 10,
-                                        "Internal IT Department": 70 if predicted_class == "Internal IT Department" else 10
-                                    },
-                                    "llm_explanation": f"Based on text analysis, this appears to be a {predicted_class}. " +
-                                                       f"The domain name '{domain}' and available content suggest this classification."
-                                }
-                            else:
-                                # If that still fails, raise the original error
-                                raise e
-                    
+                # Parse and validate the JSON with our centralized function
+                parsed_json = parse_and_validate_json(json_str, context=f"for domain {domain}")
+                
+                if parsed_json:
                     # Validate and normalize the parsed JSON
                     parsed_json = validate_classification(parsed_json, domain)
                     
@@ -693,17 +537,38 @@ Please classify this domain based on the domain name alone. Consider typical nam
                     
                     # Return the validated classification
                     return parsed_json
-                    
-                except Exception as e:
-                    logger.error(f"Error parsing LLM response: {e}")
-                    logger.error(f"JSON string: {json_str}")
-                    # Continue to text parsing with improved extraction
+                else:
+                    # JSON parsing failed, try direct text extraction
+                    predicted_class = extract_predicted_class_from_text(text_response)
+                    if predicted_class:
+                        logger.info(f"Extracted predicted class directly from text: {predicted_class}")
+                        # Create a simplified result with the extracted class
+                        parsed_json = {
+                            "processing_status": 2,  # Success
+                            "predicted_class": predicted_class,
+                            "is_service_business": predicted_class != "Internal IT Department",
+                            "detection_method": "text_extraction_fallback",
+                            "low_confidence": True,
+                            "max_confidence": 0.5,  # Medium confidence since we had to extract
+                            "confidence_scores": {
+                                "Managed Service Provider": 70 if predicted_class == "Managed Service Provider" else 10,
+                                "Integrator - Commercial A/V": 70 if predicted_class == "Integrator - Commercial A/V" else 10,
+                                "Integrator - Residential A/V": 70 if predicted_class == "Integrator - Residential A/V" else 10,
+                                "Internal IT Department": 70 if predicted_class == "Internal IT Department" else 10
+                            },
+                            "llm_explanation": f"Based on text analysis, this appears to be a {predicted_class}. " +
+                                           f"The domain name '{domain}' and available content suggest this classification."
+                        }
+                        
+                        # Ensure the explanation has the step-by-step format
+                        parsed_json = ensure_step_format(parsed_json, domain)
+                        return parsed_json
             
             # If we get here, JSON parsing failed, try improved text parsing
             logger.warning("Could not find JSON in LLM response, falling back to text parsing")
             
             # First try to extract predicted class directly from text
-            predicted_class = self._improved_extract_predicted_class(text_response)
+            predicted_class = extract_predicted_class_from_text(text_response)
             if predicted_class:
                 logger.info(f"Direct extraction found predicted class: {predicted_class}")
                 # Create result based on extracted class
