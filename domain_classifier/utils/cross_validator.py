@@ -60,6 +60,36 @@ def reconcile_classification(classification: Dict[str, Any],
             
             return classification
     
+    # CRITICAL: Special check for IT Services industry - this should always be MSP
+    if ('it service' in apollo_industry or 
+        'information technology' in apollo_industry or 
+        'information technology & services' in apollo_industry or 
+        'computer networking' in apollo_industry or
+        'information technology and services' in apollo_industry or
+        'managed services' in apollo_industry):
+        
+        logger.info(f"IT Services industry detected for {domain} from Apollo: {apollo_industry}")
+        
+        if classification.get('predicted_class') != "Managed Service Provider":
+            logger.warning(f"IT Services company {domain} was misclassified as {classification.get('predicted_class')}, correcting to MSP")
+            
+            # Override classification
+            classification['predicted_class'] = "Managed Service Provider"
+            classification['is_service_business'] = True
+            classification['confidence_scores'] = {
+                'Managed Service Provider': 90,
+                'Integrator - Commercial A/V': 5,
+                'Integrator - Residential A/V': 5,
+                'Internal IT Department': 0
+            }
+            classification['max_confidence'] = 0.9
+            classification['detection_method'] = "cross_validation_it_services"
+            
+            # Log success
+            logger.info(f"Reclassified {domain} as Managed Service Provider based on IT Services industry")
+            
+            return classification
+    
     # Quick check for manufacturing/industrial companies - usually Internal IT
     industrial_terms = ['manufacturing', 'industrial', 'factory', 'production']
     if apollo_industry and any(term in apollo_industry for term in industrial_terms):
@@ -108,6 +138,7 @@ def reconcile_classification(classification: Dict[str, Any],
         employee_count = safe_get(ai_dict, 'employee_count', 0)
     
     # List of industries that typically aren't MSPs or AV integrators
+    # CRITICAL FIX: Remove 'information technology', 'it service', etc. from this list
     non_service_industries = [
         # Manufacturing & Industrial
         'manufacturing', 'forging', 'steel', 'industrial', 'factory', 'production',
@@ -133,6 +164,47 @@ def reconcile_classification(classification: Dict[str, Any],
         'maritime', 'shipping', 'vessel', 'boat', 'nautical', 'marine', 'cruise',
         'ferry', 'yacht', 'port', 'harbor', 'offshore', 'naval', 'dock'
     ]
+    
+    # List of industries that are explicitly MSP or IT service providers
+    msp_industries = [
+        'information technology', 
+        'it service', 
+        'information technology & services',
+        'information technology and services',
+        'computer networking',
+        'network security',
+        'computer & network security',
+        'managed services',
+        'it consulting',
+        'cloud services',
+        'cyber security',
+        'cybersecurity'
+    ]
+    
+    # Check if the industry is specifically an MSP industry
+    is_msp_industry = False
+    if apollo_industry:
+        for term in msp_industries:
+            if term in apollo_industry:
+                is_msp_industry = True
+                logger.info(f"MSP industry detected for {domain} from Apollo: {apollo_industry}")
+                break
+    
+    # If it's an MSP industry but classified differently, override to MSP
+    if is_msp_industry and classification.get('predicted_class') != "Managed Service Provider":
+        logger.warning(f"MSP industry company {domain} was misclassified as {classification.get('predicted_class')}")
+        classification['predicted_class'] = "Managed Service Provider"
+        classification['is_service_business'] = True
+        classification['confidence_scores'] = {
+            'Managed Service Provider': 90,
+            'Integrator - Commercial A/V': 5,
+            'Integrator - Residential A/V': 5,
+            'Internal IT Department': 0
+        }
+        classification['max_confidence'] = 0.9
+        classification['detection_method'] = "cross_validation_msp_industry"
+        logger.info(f"Reclassified {domain} as Managed Service Provider based on MSP industry")
+        return classification
     
     # Industries that could be BOTH product and service businesses (dual nature)
     # AV integrators often fall into these categories
@@ -226,6 +298,12 @@ def reconcile_classification(classification: Dict[str, Any],
         
         # Potential conflict detected - industry data doesn't match classification
         should_override = False
+        
+        # CRITICAL FIX: Check for IT services industry - never override to Internal IT Department
+        if apollo_industry and any(term in apollo_industry for term in msp_industries):
+            logger.info(f"IT services industry detected for {domain}, preserving MSP classification")
+            should_override = False
+            return classification  # Early return to prevent further override checks
         
         # For maritime industry, always override service business classification
         if is_maritime:
