@@ -1,8 +1,11 @@
 """
 Domain Classifier Main Entry Point
+
 This is the main entry point for the Domain Classifier application.
+
 It creates and configures the Flask application using the modular structure.
 """
+
 import os
 import sys
 import logging
@@ -15,6 +18,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+
 logger = logging.getLogger(__name__)
 
 print("="*80)
@@ -26,6 +30,7 @@ print("="*80)
 
 # Create a minimal fallback app in case all imports fail
 fallback_app = Flask(__name__)
+
 @fallback_app.route('/health')
 def fallback_health():
     return jsonify({"status": "minimal fallback healthy", "version": "fallback", "timestamp": time.time()})
@@ -72,6 +77,15 @@ try:
     from domain_classifier.api.app import create_app
     logger.info("Successfully imported app factory")
     
+    # Apply fixes before creating the app
+    try:
+        import fixes
+        fixes.apply_patches()
+        logger.info("Applied domain classifier fixes")
+    except Exception as fix_error:
+        logger.error(f"Failed to apply fixes: {fix_error}")
+        logger.error(traceback.format_exc())
+    
     # Create the Flask application
     logger.info("Creating app using create_app()")
     new_app = create_app()
@@ -89,6 +103,7 @@ except ImportError as e:
     logger.error(f"Error details: {traceback.format_exc()}")
     logger.warning("This is likely a circular import issue between modules")
     # Continue to fallback mechanism
+
 except Exception as e:
     logger.error(f"Error using modular structure: {e}")
     logger.error(traceback.format_exc())
@@ -98,6 +113,7 @@ except Exception as e:
         # Check for both possible filenames
         if os.path.exists("api_service_old.py"):
             logger.info("Falling back to old structure (api_service_old.py)")
+            
             # Update the import to handle the llm_classifier not found error
             try:
                 # First ensure the llm_classifier module exists by copying from the new structure
@@ -106,34 +122,43 @@ except Exception as e:
                     logger.info("Creating llm_classifier.py for legacy support")
                     with open("llm_classifier.py", "w") as f:
                         f.write("# Legacy adapter\nfrom domain_classifier.classifiers.llm_classifier import LLMClassifier\n")
+                
                 import api_service_old
+                
                 if hasattr(api_service_old, 'app') and api_service_old.app is not None:
                     app = api_service_old.app
                     logger.info("Successfully loaded app from api_service_old.py")
                 else:
                     logger.error("api_service_old.py doesn't contain a valid app")
+            
             except Exception as import_error:
                 logger.error(f"Error importing api_service_old: {import_error}")
-                
+        
         elif os.path.exists("api_service.py"):
             logger.info("Falling back to old structure (api_service.py)")
+            
             try:
                 # Similar fix for api_service.py
                 if not os.path.exists("llm_classifier.py"):
                     logger.info("Creating llm_classifier.py for legacy support")
                     with open("llm_classifier.py", "w") as f:
                         f.write("# Legacy adapter\nfrom domain_classifier.classifiers.llm_classifier import LLMClassifier\n")
+                
                 import api_service
+                
                 if hasattr(api_service, 'app') and api_service.app is not None:
                     app = api_service.app
                     logger.info("Successfully loaded app from api_service.py")
                 else:
                     logger.error("api_service.py doesn't contain a valid app")
+            
             except Exception as import_error:
                 logger.error(f"Error importing api_service: {import_error}")
+        
         else:
             logger.warning("Neither api_service_old.py nor api_service.py found")
             # Keep using the fallback app
+    
     except Exception as e:
         logger.error(f"Error falling back to old structure: {e}")
         logger.error(traceback.format_exc())
