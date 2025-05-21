@@ -1,8 +1,10 @@
 """Process classification results for API responses."""
 import logging
-import json
-import re  # Added import for regex operations
+import re
 from typing import Dict, Any, Optional
+
+# Import central JSON parser module
+from domain_classifier.utils.json_parser import parse_and_validate_json, ensure_dict, safe_get
 
 # Import final classification utility
 from domain_classifier.utils.final_classification import determine_final_classification
@@ -223,10 +225,7 @@ def process_fresh_result(classification: Dict[str, Any], domain: str, email: Opt
             if "apollo_data" in classification and classification["apollo_data"]:
                 apollo_data = classification["apollo_data"]
                 if isinstance(apollo_data, str):
-                    try:
-                        apollo_data = json.loads(apollo_data)
-                    except:
-                        apollo_data = {}
+                    apollo_data = parse_and_validate_json(apollo_data, context="apollo_data_processor")
                 
                 if apollo_data and apollo_data.get('name'):
                     result["company_name"] = apollo_data.get('name')
@@ -236,10 +235,7 @@ def process_fresh_result(classification: Dict[str, Any], domain: str, email: Opt
             if "company_name" not in result and "ai_company_data" in classification and classification["ai_company_data"]:
                 ai_data = classification["ai_company_data"]
                 if isinstance(ai_data, str):
-                    try:
-                        ai_data = json.loads(ai_data)
-                    except:
-                        ai_data = {}
+                    ai_data = parse_and_validate_json(ai_data, context="ai_data_processor")
                 
                 if ai_data and ai_data.get('name'):
                     # Check for suspicious name patterns
@@ -260,14 +256,6 @@ def process_fresh_result(classification: Dict[str, Any], domain: str, email: Opt
             preserved_crawler_type = classification.get("crawler_type", None)
             preserved_classifier_type = classification.get("classifier_type", None)
 
-        # REMOVED: Don't add website URL conditionally - it's already set at the beginning
-        # if url:
-        #     result["website_url"] = url
-            
-        # REMOVED: Don't add email conditionally - it's already set at the beginning
-        # if email:
-        #     result["email"] = email
-        
         # Add error_type if present in classification
         if "error_type" in classification:
             result["error_type"] = classification["error_type"]
