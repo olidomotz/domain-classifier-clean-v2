@@ -1,15 +1,13 @@
 """Cache management for domain classification results."""
 import logging
-import json
-import re
 from typing import Dict, Any, Optional
 
 # Import final classification utility
 from domain_classifier.utils.final_classification import determine_final_classification
 # Import text processing utilities
 from domain_classifier.utils.text_processing import generate_one_line_description
-# Import JSON utilities
-from domain_classifier.utils.json_utils import ensure_dict, safe_get
+# Import JSON parser module
+from domain_classifier.utils.json_parser import ensure_dict, safe_get, parse_and_validate_json
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -64,7 +62,7 @@ def process_cached_result(record: Dict[str, Any], domain: str, email: Optional[s
     # Extract confidence scores
     confidence_scores = {}
     try:
-        confidence_scores = json.loads(record.get('ALL_SCORES', '{}'))
+        confidence_scores = parse_and_validate_json(record.get('ALL_SCORES', '{}'), context="confidence_scores") or {}
     except Exception as e:
         logger.warning(f"Could not parse ALL_SCORES for {domain}: {e}")
     
@@ -74,7 +72,7 @@ def process_cached_result(record: Dict[str, Any], domain: str, email: Optional[s
     # If LLM_EXPLANATION is not available, try to get it from model_metadata
     if not llm_explanation:
         try:
-            metadata = json.loads(record.get('MODEL_METADATA', '{}'))
+            metadata = parse_and_validate_json(record.get('MODEL_METADATA', '{}'), context="model_metadata")
             llm_explanation = metadata.get('llm_explanation', '')
         except Exception as e:
             logger.warning(f"Could not parse model_metadata for {domain}: {e}")
@@ -234,14 +232,6 @@ def process_cached_result(record: Dict[str, Any], domain: str, email: Optional[s
             logger.info(f"Generated recommendations from cached Apollo data for {domain}")
         except Exception as e:
             logger.warning(f"Could not generate recommendations from cached data: {e}")
-    
-    # REMOVED: Don't add email and URL conditionally - they're set at the beginning
-    # Add email and URL if provided
-    # if email:
-    #     result["email"] = email
-    
-    # if url:
-    #     result["website_url"] = url
     
     # Add error_type if present in record
     if record.get('ERROR_TYPE'):
