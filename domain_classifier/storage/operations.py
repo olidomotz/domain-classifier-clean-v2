@@ -5,6 +5,9 @@ import hashlib
 from typing import Dict, Any, Optional, Tuple, List
 import traceback
 
+# Import from centralized JSON parser module
+from domain_classifier.utils.json_parser import parse_and_validate_json, ensure_dict, safe_get
+
 # Set up logging
 logger = logging.getLogger(__name__)
 
