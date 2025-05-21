@@ -1,7 +1,7 @@
 """
-Domain Classifier Fixes - Enhanced Description Version
+Domain Classifier Fixes - Final Balanced Version
 
-This script applies fixes with emphasis on generating detailed 100-word company descriptions.
+This script applies fixes that properly integrate Apollo data with crawled content.
 """
 
 import logging
@@ -12,8 +12,8 @@ from typing import Dict, Any, Optional
 logger = logging.getLogger(__name__)
 
 def apply_patches():
-    """Apply patches with emphasis on creating detailed company descriptions."""
-    logger.info("Applying domain classifier fixes with enhanced descriptions...")
+    """Apply patches with balanced data integration."""
+    logger.info("Applying domain classifier fixes - final balanced version...")
     
     # 1. Patch api_formatter.format_api_response with improved description generation
     try:
@@ -43,13 +43,38 @@ def apply_patches():
             # Always set the flag whether true or false
             result["has_apollo_data"] = has_apollo
             
+            # Correctly set crawler_type based on actual content source
+            if result.get("crawler_type") == "pending":
+                if "content_source" in result and result["content_source"] == "fresh_crawl":
+                    result["crawler_type"] = "fresh_crawl"
+                elif "content_source" in result and result["content_source"] == "existing_content":
+                    result["crawler_type"] = "existing_content"
+                elif "source" in result and "cached" in str(result["source"]):
+                    result["crawler_type"] = "cached_content"
+                elif "crawler_type" in result and result["crawler_type"] in ["direct_http", "direct_https", "scrapy"]:
+                    # Keep the specific crawler type if available
+                    pass
+                else:
+                    # Only use apollo_data crawler type if we really have no content
+                    result["crawler_type"] = "direct_fallback"
+            
             # Create a robust 100-word company description if missing or too short
             if not result.get("company_description") or len(result.get("company_description", "")) < 100:
                 company_class = result.get("predicted_class", "business")
                 domain = result.get("domain", "Unknown")
-                company_name = result.get("company_name", domain.split('.')[0].capitalize())
                 
-                # Get more detailed company info from Apollo and AI data
+                # Set company name with priority order: crawl-extracted data > Apollo > domain
+                company_name = None
+                if "ai_company_data" in result and isinstance(result["ai_company_data"], dict):
+                    company_name = result["ai_company_data"].get("name")
+                
+                if not company_name and has_apollo and isinstance(apollo_data, dict):
+                    company_name = apollo_data.get("name")
+                
+                if not company_name:
+                    company_name = result.get("company_name", domain.split('.')[0].capitalize())
+                
+                # Get more detailed company info with priority: crawled data > Apollo
                 industry = ""
                 founded_year = ""
                 employees = ""
@@ -59,29 +84,59 @@ def apply_patches():
                 states_served = []
                 business_focus = ""
                 
-                # Extract data from Apollo
-                if has_apollo and isinstance(apollo_data, dict):
-                    industry = apollo_data.get("industry", "")
-                    founded_year = apollo_data.get("founded_year", "")
-                    employees = apollo_data.get("employee_count", "")
+                # First try to get data from crawl (AI extraction)
+                if "ai_company_data" in result and isinstance(result["ai_company_data"], dict):
+                    ai_data = result["ai_company_data"]
+                    if not industry and ai_data.get("industry"):
+                        industry = ai_data.get("industry")
+                    if not founded_year and ai_data.get("founded_year"):
+                        founded_year = ai_data.get("founded_year")
+                    if not employees and ai_data.get("employee_count"):
+                        employees = ai_data.get("employee_count")
                     
-                    # Get location info
-                    address = apollo_data.get("address", {})
-                    if isinstance(address, dict):
-                        city = address.get("city", "")
-                        state = address.get("state", "")
-                        country = address.get("country", "")
-                        
-                        location_parts = []
-                        if city:
-                            location_parts.append(city)
-                        if state:
-                            location_parts.append(state)
-                        if country and country != "United States":
-                            location_parts.append(country)
-                        
-                        if location_parts:
-                            location = ", ".join(location_parts)
+                    # Get location from AI data
+                    city = ai_data.get("city")
+                    state = ai_data.get("state")
+                    country = ai_data.get("country")
+                    
+                    location_parts = []
+                    if city:
+                        location_parts.append(city)
+                    if state:
+                        location_parts.append(state)
+                    if country and country != "United States" and country != "US" and country != "USA":
+                        location_parts.append(country)
+                    
+                    if location_parts:
+                        location = ", ".join(location_parts)
+                
+                # Then fill in missing pieces from Apollo
+                if has_apollo and isinstance(apollo_data, dict):
+                    if not industry and apollo_data.get("industry"):
+                        industry = apollo_data.get("industry")
+                    if not founded_year and apollo_data.get("founded_year"):
+                        founded_year = apollo_data.get("founded_year")
+                    if not employees and apollo_data.get("employee_count"):
+                        employees = apollo_data.get("employee_count")
+                    
+                    # Only get location from Apollo if we don't have it from AI data
+                    if not location:
+                        address = apollo_data.get("address", {})
+                        if isinstance(address, dict):
+                            city = address.get("city")
+                            state = address.get("state")
+                            country = address.get("country")
+                            
+                            location_parts = []
+                            if city:
+                                location_parts.append(city)
+                            if state:
+                                location_parts.append(state)
+                            if country and country != "United States" and country != "US" and country != "USA":
+                                location_parts.append(country)
+                            
+                            if location_parts:
+                                location = ", ".join(location_parts)
                 
                 # Generate a list of appropriate services based on company type
                 if company_class == "Managed Service Provider":
@@ -133,15 +188,6 @@ def apply_patches():
                         "businesses across various industries"
                     ])
                     
-                    # States or regions served (for US companies)
-                    if location and "," in location:
-                        state = location.split(",")[1].strip() if len(location.split(",")) > 1 else ""
-                        if state in US_REGIONS:
-                            region = US_REGIONS[state]
-                            nearby_states = NEARBY_STATES.get(state, [])
-                            if nearby_states:
-                                # Select 2-3 nearby states
-                                states_served = random.sample(nearby_states, min(3, len(nearby_states)))
                 elif company_class == "Integrator - Commercial A/V":
                     services = [
                         "commercial audio-visual systems",
@@ -218,11 +264,6 @@ def apply_patches():
                 if business_focus:
                     description += f" for {business_focus}"
                 
-                if states_served:
-                    description += f". The company serves clients throughout {', '.join(states_served[:-1])}"
-                    if len(states_served) > 1:
-                        description += f" and {states_served[-1]}"
-                
                 if technologies:
                     description += f". They leverage technologies including {', '.join(technologies[:-1])}"
                     if len(technologies) > 1:
@@ -252,14 +293,22 @@ def apply_patches():
             
             # Set content quality based on available information
             content_quality = result.get("content_quality", 0)
-            if "crawler_type" in result and result["crawler_type"] != "pending":
-                if result["crawler_type"] in ["existing_content", "direct_https", "direct_http", "scrapy"]:
+            
+            # If content was actually crawled or found in cache, set to substantial
+            if "content_source" in result:
+                if result["content_source"] in ["fresh_crawl", "existing_content"]:
+                    content_quality = 2  # Substantial content
+            # Check crawler_type as an alternative indicator
+            elif "crawler_type" in result and result["crawler_type"] != "pending":
+                if any(crawler in result["crawler_type"] for crawler in 
+                      ["direct_https", "direct_http", "scrapy", "existing_content", "cached_content"]):
                     content_quality = 2  # Substantial content
                 elif "minimal" in result["crawler_type"].lower():
                     content_quality = 1  # Minimal content
+            # Fallback to Apollo data presence
             elif has_apollo:
-                # If we have Apollo data, we likely have some information about the company
-                content_quality = 2
+                # If we have Apollo data but no content, set to 1 (minimal)
+                content_quality = 1
             
             # Set quality label
             quality_label = "Did not connect"
@@ -270,13 +319,6 @@ def apply_patches():
             
             result["content_quality"] = content_quality
             result["content_quality_label"] = quality_label
-            
-            # Fix crawler_type if it's pending
-            if result.get("crawler_type") == "pending":
-                if has_apollo:
-                    result["crawler_type"] = "apollo_data"
-                else:
-                    result["crawler_type"] = "direct_fallback"
             
             # Ensure confidence scores are consistent for MSP classification
             if result.get("predicted_class") == "Managed Service Provider":
@@ -303,7 +345,7 @@ def apply_patches():
         
         # Apply the patch
         api_formatter.format_api_response = patched_format_api
-        logger.info("✅ Successfully patched api_formatter.format_api_response with enhanced descriptions")
+        logger.info("✅ Successfully patched api_formatter.format_api_response with balanced data integration")
     except Exception as e:
         logger.error(f"❌ Failed to patch api_formatter: {e}")
     
@@ -336,21 +378,79 @@ def apply_patches():
                     if apollo_data:
                         result["has_apollo_data"] = True
                     
-                    # Set content quality if missing
-                    if "content_quality" not in result:
-                        result["content_quality"] = 2  # Assume substantial if we have Apollo data
-                    
                     logger.info(f"Updated confidence scores and enriched data after reclassification to MSP")
             
             return result
         
         # Apply the patch
         cross_validator.reconcile_classification = patched_reconcile
-        logger.info("✅ Successfully patched cross_validator.reconcile_classification with enhanced fields")
+        logger.info("✅ Successfully patched cross_validator.reconcile_classification")
     except Exception as e:
         logger.error(f"❌ Failed to patch cross_validator: {e}")
     
-    # 3. Add reference data for generating detailed descriptions
+    # 3. Patch result_processor to better integrate crawled content with Apollo data
+    try:
+        from domain_classifier.storage import result_processor
+        
+        original_process_fresh = result_processor.process_fresh_result
+        
+        def patched_process_fresh(classification, domain, email=None, url=None):
+            # Determine Apollo data availability
+            has_apollo = False
+            apollo_data = classification.get("apollo_data", {})
+            
+            if apollo_data:
+                if isinstance(apollo_data, str):
+                    try:
+                        apollo_data = json.loads(apollo_data)
+                    except:
+                        apollo_data = {}
+                
+                # Check if Apollo data has meaningful content
+                if isinstance(apollo_data, dict):
+                    key_fields = ["name", "industry", "employee_count", "founded_year", "phone"]
+                    has_apollo = any(apollo_data.get(field) for field in key_fields)
+            
+            classification["has_apollo_data"] = has_apollo
+            
+            # Preserve crawler_type information and set properly
+            crawler_type = classification.get("crawler_type")
+            if crawler_type == "pending" or not crawler_type:
+                if "content_source" in classification:
+                    crawler_type = classification["content_source"]
+                elif "source" in classification and "cached" in str(classification["source"]):
+                    crawler_type = "cached_content"
+                else:
+                    # Keep as pending or set a descriptive default
+                    crawler_type = crawler_type or "unknown"
+            
+            classification["crawler_type"] = crawler_type
+            
+            # Call original function
+            result = original_process_fresh(classification, domain, email, url)
+            
+            # Ensure our fields are preserved
+            result["has_apollo_data"] = has_apollo
+            
+            # Set more accurate content quality
+            if "content_quality" not in result:
+                result["content_quality"] = 0
+                if "content_source" in classification and classification["content_source"] in ["fresh_crawl", "existing_content"]:
+                    result["content_quality"] = 2  # Substantial content
+                elif crawler_type in ["direct_https", "direct_http", "scrapy", "cached_content", "existing_content"]:
+                    result["content_quality"] = 2  # Substantial content
+                elif has_apollo:
+                    result["content_quality"] = 1  # Minimal - we have some info but no full content
+            
+            return result
+        
+        # Apply the patch
+        result_processor.process_fresh_result = patched_process_fresh
+        logger.info("✅ Successfully patched result_processor.process_fresh_result with improved content handling")
+    except Exception as e:
+        logger.error(f"❌ Failed to patch result_processor: {e}")
+    
+    # 4. Add reference data for generating detailed descriptions
     # Define US regions for generating location-based content
     global US_REGIONS, NEARBY_STATES
     US_REGIONS = {
@@ -367,32 +467,12 @@ def apply_patches():
     }
     
     NEARBY_STATES = {
-        "AL": ["GA", "FL", "MS", "TN"],
-        "AK": ["WA", "OR"],
-        "AZ": ["CA", "NV", "UT", "NM"],
-        "AR": ["MO", "TN", "MS", "LA", "TX", "OK"],
-        "CA": ["OR", "NV", "AZ"],
-        "CO": ["WY", "NE", "KS", "OK", "NM", "AZ", "UT"],
-        "CT": ["NY", "MA", "RI"],
-        "DE": ["MD", "PA", "NJ"],
-        "FL": ["GA", "AL"],
-        "GA": ["FL", "AL", "TN", "NC", "SC"],
-        "HI": [],
-        "ID": ["WA", "OR", "NV", "UT", "WY", "MT"],
         "IL": ["WI", "IN", "KY", "MO", "IA"],
-        "IN": ["MI", "OH", "KY", "IL"],
-        "IA": ["MN", "WI", "IL", "MO", "NE", "SD"],
-        "KS": ["NE", "MO", "OK", "CO"],
-        "KY": ["IN", "OH", "WV", "VA", "TN", "MO", "IL"],
-        "LA": ["TX", "AR", "MS"],
-        "ME": ["NH"],
-        "MD": ["PA", "DE", "VA", "WV"],
-        "MA": ["RI", "CT", "NY", "NH", "VT"],
-        "MI": ["WI", "IN", "OH"],
-        "MN": ["WI", "IA", "SD", "ND"],
-        "MS": ["LA", "AR", "TN", "AL"],
-        "MO": ["IA", "IL", "KY", "TN", "AR", "OK", "KS", "NE"],
-        "TX": ["NM", "OK", "AR", "LA"]
+        "TX": ["NM", "OK", "AR", "LA"],
+        "CA": ["OR", "NV", "AZ"],
+        "FL": ["GA", "AL"],
+        "NY": ["NJ", "CT", "PA", "MA"],
+        # Add more as needed
     }
     
-    logger.info("Domain classifier fixes applied with enhanced description generation")
+    logger.info("Domain classifier fixes applied with balanced data integration")
