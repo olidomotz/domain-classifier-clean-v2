@@ -18,6 +18,8 @@ def clean_json_string(json_str: str) -> str:
     Returns:
         str: The cleaned JSON string
     """
+    logger.info("Using enhanced JSON cleaner with Claude-specific fixes")
+    
     if not json_str:
         return json_str
     
@@ -33,9 +35,21 @@ def clean_json_string(json_str: str) -> str:
     json_str = re.sub(r'\\"', '"', json_str)
     
     # CRITICAL FIX: Handle Claude's specific format of double quotes inside quotes
-    # Example: "predicted_class": " "Managed Service Provider"" 
+    # Pattern 1: "predicted_class": " "Managed Service Provider"" 
     json_str = re.sub(r': " "([^"]+)"", ', r': "\1", ', json_str)
     json_str = re.sub(r': " "([^"]+)""}', r': "\1"}', json_str)
+    
+    # Pattern 2: "predicted_class": ""Managed Service Provider""
+    json_str = re.sub(r': ""([^"]+)"", ', r': "\1", ', json_str)
+    json_str = re.sub(r': ""([^"]+)""}', r': "\1"}', json_str)
+    
+    # Log if we found Claude's specific format
+    if re.search(r': " "([^"]+)"', json_str) or re.search(r': ""([^"]+)"', json_str):
+        logger.info("Detected and fixed Claude's double-quoted format")
+        # Print the specific portion being fixed
+        match = re.search(r': " "([^"]+)"', json_str) or re.search(r': ""([^"]+)"', json_str)
+        if match:
+            logger.info(f"Fixed pattern: {match.group(0)}")
     
     # Fix the problematic pattern: "score": X, 0
     json_str = re.sub(r'": (\d+),\s*0([,}])', r'": \1\2', json_str)
@@ -50,10 +64,13 @@ def clean_json_string(json_str: str) -> str:
             unescaped = json.loads(json_str)
             if isinstance(unescaped, str) and unescaped.startswith('{') and unescaped.endswith('}'):
                 json_str = unescaped
-        except:
+                logger.info("Unwrapped JSON string wrapped in quotes")
+        except Exception as e:
+            logger.info(f"Failed to unwrap JSON: {e}")
             # If that fails, just strip the quotes directly
             if json_str.startswith('"') and json_str.endswith('"'):
                 json_str = json_str[1:-1]
+                logger.info("Manually stripped outer quotes from JSON string")
     
     # Fix missing quotes around property names
     json_str = re.sub(r'([{,])\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*:', r'\1"\2":', json_str)
@@ -90,16 +107,34 @@ def clean_json_string(json_str: str) -> str:
             json_str
         )
     
+    # Ultra-aggressive fix: If we still have Claude's double quotes pattern, do a more direct replacement
+    if ' ""' in json_str or '" "' in json_str:
+        # Pattern: "field": ""Value""
+        json_str = re.sub(r'"([^"]+)":\s*""([^"]+)""', r'"\1": "\2"', json_str)
+        # Pattern: "field": " "Value" "
+        json_str = re.sub(r'"([^"]+)":\s*" "([^"]+)" "', r'"\1": "\2"', json_str)
+        # Pattern: "field": " "Value""
+        json_str = re.sub(r'"([^"]+)":\s*" "([^"]+)""', r'"\1": "\2"', json_str)
+        logger.info("Applied ultra-aggressive double quotes fix")
+    
     # Log significant changes
     if original != json_str:
         # Calculate the difference percentage
         diff_percentage = 100 - (len(json_str) / max(1, len(original)) * 100)
-        logger.debug(f"JSON cleaned (changed by {diff_percentage:.1f}%)")
+        logger.info(f"JSON cleaned (changed by {diff_percentage:.1f}%)")
         
-        # Log more details at trace level
+        # Log more details
         if diff_percentage > 10:
-            logger.debug(f"Original JSON: {original[:100]}...")
-            logger.debug(f"Cleaned JSON: {json_str[:100]}...")
+            logger.info(f"Original JSON snippet: {original[:50]}...")
+            logger.info(f"Cleaned JSON snippet: {json_str[:50]}...")
+    
+    # Final test: Try to parse it to see if our cleaning worked
+    try:
+        json.loads(json_str)
+        logger.info("✅ JSON is now valid after cleaning")
+    except json.JSONDecodeError as e:
+        logger.warning(f"⚠️ JSON is still invalid after cleaning: {e}")
+        logger.warning(f"Problem area: {json_str[max(0, e.pos-20):min(len(json_str), e.pos+20)]}")
     
     return json_str
 
