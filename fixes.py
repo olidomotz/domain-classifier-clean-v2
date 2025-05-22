@@ -297,6 +297,9 @@ def apply_patches():
 
     # 6. Add the fix to prevent description fabrication
     prevent_description_fabrication()
+    
+    # 7. Add the fix to reclassify parked domains using Apollo data
+    reclassify_parked_domains_with_apollo()
 
     logger.info("Complete classification hierarchy fixes successfully applied")
 
@@ -358,3 +361,144 @@ def prevent_description_fabrication():
         
     except Exception as e:
         logger.error(f"❌ Failed to patch api_formatter for no data handling: {e}")
+
+def reclassify_parked_domains_with_apollo():
+    """Modify system to reclassify parked domains using Apollo description when available."""
+    try:
+        from domain_classifier.utils import final_classification
+        
+        original_determine = final_classification.determine_final_classification
+        
+        def enhanced_final_classification(result):
+            """Enhanced final classification that uses Apollo data to reclassify parked domains."""
+            # Check if this is a parked domain
+            if result.get("is_parked", False) or result.get("predicted_class") == "Parked Domain":
+                # Check if Apollo data is available
+                apollo_data = result.get("apollo_data", {})
+                
+                if apollo_data and any(apollo_data.values()):
+                    logger.info(f"Parked domain {result.get('domain')} has Apollo data - attempting reclassification")
+                    
+                    # Check if Apollo has a description we can use for classification
+                    apollo_description = None
+                    if isinstance(apollo_data, dict):
+                        # Check for description fields in priority order
+                        for field in ["short_description", "description", "long_description"]:
+                            if apollo_data.get(field):
+                                apollo_description = apollo_data.get(field)
+                                logger.info(f"Using Apollo {field} for reclassification")
+                                break
+                    
+                    # If we have a description, attempt reclassification
+                    if apollo_description:
+                        try:
+                            # Import LLM classifier
+                            from domain_classifier.classifiers.llm_classifier import LLMClassifier
+                            
+                            # Get API key from environment
+                            import os
+                            api_key = os.environ.get("ANTHROPIC_API_KEY")
+                            
+                            if api_key:
+                                # Create classifier instance
+                                classifier = LLMClassifier(api_key=api_key)
+                                
+                                # Run classification on Apollo description
+                                classification = classifier.classify(
+                                    content=apollo_description,
+                                    domain=result.get("domain")
+                                )
+                                
+                                if classification and classification.get("predicted_class"):
+                                    new_class = classification.get("predicted_class")
+                                    logger.info(f"Reclassified parked domain {result.get('domain')} as {new_class} based on Apollo description")
+                                    
+                                    # Update the result with the new classification
+                                    result["predicted_class"] = new_class
+                                    result["is_service_business"] = classification.get("is_service_business", True)
+                                    result["detection_method"] = "apollo_description_classification"
+                                    
+                                    # Update confidence scores if available
+                                    if "confidence_scores" in classification:
+                                        result["confidence_scores"] = classification.get("confidence_scores")
+                                    
+                                    # Now determine final classification based on new predicted_class
+                                    if new_class == "Managed Service Provider":
+                                        return "1-MSP"
+                                    elif new_class == "Integrator - Commercial A/V":
+                                        return "3-Commercial Integrator"
+                                    elif new_class == "Integrator - Residential A/V":
+                                        return "4-Residential Integrator"
+                                    elif new_class == "Internal IT Department":
+                                        return "2-Internal IT"
+                            else:
+                                logger.warning(f"Cannot reclassify parked domain {result.get('domain')} - No API key")
+                        except Exception as e:
+                            logger.error(f"Error reclassifying parked domain with Apollo data: {e}")
+                
+                # If reclassification failed or wasn't attempted, use the original logic
+                has_apollo = bool(apollo_data and any(apollo_data.values()))
+                logger.info(f"Domain is parked. Has Apollo data: {has_apollo}")
+                
+                if has_apollo:
+                    return "5-Parked Domain with partial enrichment"
+                else:
+                    return "6-Parked Domain - no enrichment"
+            
+            # For non-parked domains, use the original function
+            return original_determine(result)
+        
+        # Apply the patch
+        final_classification.determine_final_classification = enhanced_final_classification
+        
+        logger.info("✅ Successfully patched final_classification to reclassify parked domains using Apollo data")
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to patch final_classification for parked domains: {e}")
+    
+    # Also enhance the description generation for parked domains with Apollo data
+    try:
+        from domain_classifier.enrichment import description_enhancer
+        
+        original_generate = description_enhancer.generate_detailed_description
+        
+        def enhanced_description_for_parked(classification, apollo_data=None, apollo_person_data=None):
+            """Generate better descriptions for parked domains with Apollo data."""
+            # Check if this is a parked domain with Apollo data
+            if (classification.get("is_parked", False) or classification.get("predicted_class") == "Parked Domain") and apollo_data:
+                domain = classification.get("domain", "unknown")
+                
+                # If the domain has been reclassified using Apollo data
+                if classification.get("detection_method") == "apollo_description_classification":
+                    logger.info(f"Using reclassified description for parked domain {domain}")
+                    
+                    # Use the normal description generation, but note that it's based on Apollo data
+                    description = original_generate(classification, apollo_data, apollo_person_data)
+                    
+                    # Append note about the domain being parked
+                    if description and not "parked domain" in description.lower():
+                        description += f" Note: The {domain} website appears to be parked, but company information is available from other sources."
+                    
+                    return description
+                
+                # If Apollo has a short_description, use it
+                if isinstance(apollo_data, dict) and apollo_data.get("short_description"):
+                    description = apollo_data.get("short_description")
+                    logger.info(f"Using Apollo short_description for parked domain {domain}")
+                    
+                    # Append note about the domain being parked
+                    if not "parked domain" in description.lower():
+                        description += f" Note: The {domain} website appears to be parked, but company information is available from other sources."
+                    
+                    return description
+            
+            # For all other cases, use the original function
+            return original_generate(classification, apollo_data, apollo_person_data)
+        
+        # Apply the patch
+        description_enhancer.generate_detailed_description = enhanced_description_for_parked
+        
+        logger.info("✅ Successfully patched description_enhancer for better parked domain descriptions")
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to patch description_enhancer for parked domains: {e}")
