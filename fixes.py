@@ -290,6 +290,12 @@ def apply_patches():
     
     # 9. Add the improved description separation fix to properly handle AI and Apollo descriptions
     fix_description_separation()
+    
+    # 10. Fix Process Did Not Complete classification to use Unknown/No Data for domains with no data
+    fix_process_did_not_complete_classification()
+    
+    # 11. Ensure all text in merged data is in English
+    ensure_english_data()
 
     logger.info("Complete classification hierarchy fixes successfully applied")
 
@@ -610,8 +616,17 @@ def fix_description_separation():
                 elif apollo_data and apollo_data.get("employee_count"):
                     employee_count = f"with approximately {apollo_data.get('employee_count')} employees"
                 
+                # Handle Process Did Not Complete specially
+                if predicted_class == "Process Did Not Complete":
+                    # Check if we have any Apollo data to use
+                    if apollo_data and any(apollo_data.values()):
+                        ai_description = f"{company_name} has insufficient website data for full analysis, but some company information is available."
+                    else:
+                        ai_description = f"Unable to retrieve information for {domain} due to insufficient data."
+                    
+                    logger.info(f"Generated AI description for Process Did Not Complete: {domain}")
                 # Create class-specific detailed descriptions
-                if predicted_class == "Managed Service Provider":
+                elif predicted_class == "Managed Service Provider":
                     ai_description = f"{company_name} is an IT service provider {employee_count} that specializes in managed technology solutions for businesses. "
                     
                     # Add more specific details based on domain name
@@ -755,3 +770,280 @@ def fix_description_separation():
         logger.info("✅ Successfully applied enhanced description separation fix")
     except Exception as e:
         logger.error(f"❌ Failed to apply enhanced description separation fix: {e}")
+
+def fix_process_did_not_complete_classification():
+    """
+    Fix to properly classify domains with 'Process Did Not Complete' status.
+    This ensures they don't get incorrectly labeled as 'Internal IT'.
+    """
+    logger.info("Applying fix for Process Did Not Complete classification...")
+    
+    try:
+        from domain_classifier.utils import final_classification
+        
+        original_determine = final_classification.determine_final_classification
+        
+        def patched_determine_final_classification(result):
+            """Enhanced final classification that handles Process Did Not Complete properly."""
+            domain = result.get("domain", "")
+            
+            # First check if this is a Process Did Not Complete case
+            if result.get("predicted_class") == "Process Did Not Complete":
+                # Check if we have any meaningful data
+                apollo_data = result.get("apollo_data", {})
+                ai_data = result.get("ai_company_data", {})
+                
+                # If we have Apollo data, use it to determine classification
+                if apollo_data and isinstance(apollo_data, dict) and any(apollo_data.values()):
+                    logger.info(f"Process Did Not Complete for {domain} but has Apollo data")
+                    
+                    # Try to infer class from industry
+                    industry = apollo_data.get("industry", "").lower() if isinstance(apollo_data.get("industry"), str) else ""
+                    
+                    # If it's in IT/tech industry, classify as MSP
+                    if any(term in industry for term in ["information technology", "it service", "tech", "computer", "software", "cloud", "cyber", "network"]):
+                        logger.info(f"Classifying as MSP based on Apollo industry: {industry}")
+                        return "1-MSP"
+                    
+                    # Otherwise default to Internal IT
+                    logger.info(f"Classifying as Internal IT based on Apollo data with industry: {industry}")
+                    return "2-Internal IT"
+                    
+                # If we don't have meaningful data, use a special classification
+                logger.info(f"No data available for {domain} with Process Did Not Complete status")
+                return "8-Unknown/No Data"
+            
+            # For all other cases, use the original function
+            return original_determine(result)
+        
+        # Apply the patch
+        final_classification.determine_final_classification = patched_determine_final_classification
+        
+        logger.info("✅ Successfully patched final_classification to handle Process Did Not Complete properly")
+        
+        # Now also ensure the API formatter knows about the new classification code
+        try:
+            from domain_classifier.utils import api_formatter
+            
+            original_format = api_formatter.format_api_response
+            
+            def patched_formatter_with_unknown(result):
+                """Update API formatter to handle Unknown/No Data classification."""
+                # Get the formatted result from the current formatter
+                formatted = original_format(result)
+                
+                # Check if this is a "Process Did Not Complete" with no data
+                if result.get("predicted_class") == "Process Did Not Complete":
+                    # Update the final classification display
+                    if result.get("final_classification") == "8-Unknown/No Data":
+                        formatted["02_final_classification"] = "8-Unknown/No Data"
+                        
+                        # Also ensure we have a clear description
+                        domain = result.get("domain", "unknown")
+                        formatted["03_description"] = f"Unable to retrieve information for {domain} due to insufficient data."
+                        formatted["company_description"] = f"Unable to retrieve information for {domain} due to insufficient data."
+                
+                return formatted
+                
+            # Apply the patch
+            api_formatter.format_api_response = patched_formatter_with_unknown
+            
+            logger.info("✅ Successfully patched api_formatter to handle Unknown/No Data classification")
+        except Exception as e:
+            logger.error(f"❌ Failed to patch api_formatter for Unknown/No Data classification: {e}")
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to apply Process Did Not Complete classification fix: {e}")
+
+def ensure_english_data():
+    """
+    Ensure all data in the merged section (05) is in English by detecting and 
+    translating non-English content. This is done without requiring additional 
+    external services by using Claude's capabilities.
+    """
+    logger.info("Applying English translation fix for merged data...")
+    
+    try:
+        from domain_classifier.utils import api_formatter
+        import re
+        import os
+        import requests
+        
+        # Basic language detection patterns
+        NON_ENGLISH_PATTERNS = {
+            'italian': [
+                r'\bcome\b.*?\bche\b', r'\bin\b.*?\bcontinuo\b', r'\bovunque\b', 
+                r'\bspazio\b.*?\bfisico\b', r'\bnuvole\b', r'\bmondo\b.*?\bvirtuale\b',
+                r'\bdati\b.*?\bscambio\b', r'\bqualcosa\b.*?\boccupa\b', r'\bdisponibili\b'
+            ],
+            'german': [
+                r'\bund\b.*?\bder\b', r'\bdie\b.*?\bdas\b', r'\bfür\b', r'\bmit\b.*?\bsind\b',
+                r'\beine\b.*?\bwir\b', r'\bsich\b.*?\bauf\b'
+            ],
+            'spanish': [
+                r'\bcon\b.*?\bpara\b', r'\bde\b.*?\bla\b', r'\bel\b.*?\blos\b', r'\bsus\b.*?\bmuy\b',
+                r'\buna\b.*?\bque\b', r'\btodos\b.*?\bnuestros\b'
+            ],
+            'french': [
+                r'\bavec\b.*?\bpour\b', r'\bde\b.*?\bla\b', r'\ble\b.*?\bles\b', r'\bnous\b.*?\bvotre\b',
+                r'\bune\b.*?\bqui\b', r'\btous\b.*?\bnotre\b'
+            ]
+        }
+        
+        def detect_language(text):
+            """Detect the language of a text using basic pattern matching."""
+            if not text or not isinstance(text, str) or len(text) < 10:
+                return "english"  # Default for empty or very short texts
+                
+            text = text.lower()
+            
+            # Check for non-English patterns
+            for lang, patterns in NON_ENGLISH_PATTERNS.items():
+                matches = 0
+                for pattern in patterns:
+                    if re.search(pattern, text, re.IGNORECASE):
+                        matches += 1
+                
+                # If multiple patterns match, it's likely this language
+                if matches >= 2:
+                    return lang
+                    
+            # Check for non-ASCII characters frequency
+            non_ascii_chars = sum(1 for char in text if ord(char) > 127)
+            ascii_chars = len(text) - non_ascii_chars
+            
+            # If more than 15% non-ASCII characters, likely not English
+            if len(text) > 20 and non_ascii_chars > (len(text) * 0.15):
+                return "non-english"
+                
+            # Default to English
+            return "english"
+        
+        def translate_text(text, source_lang="auto"):
+            """
+            Translate text to English using Claude's capabilities without requiring
+            external translation APIs.
+            """
+            if not text or not isinstance(text, str) or len(text) < 3:
+                return text
+                
+            # Check if already English
+            if detect_language(text) == "english":
+                return text
+            
+            try:
+                # Use Claude API directly for translation
+                api_key = os.environ.get("ANTHROPIC_API_KEY")
+                if not api_key:
+                    logger.warning("No Anthropic API key for translation, skipping")
+                    return text
+                
+                logger.info(f"Translating text to English: '{text[:40]}...'")
+                
+                response = requests.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key": api_key,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json"
+                    },
+                    json={
+                        "model": "claude-3-haiku-20240307",  # Fast model for translations
+                        "system": "You are a precise translator that only translates text to English without adding any explanation or comments. Keep the same formatting and maintain the original meaning.",
+                        "messages": [{
+                            "role": "user", 
+                            "content": f"Please translate this text to English:\n\n{text}"
+                        }],
+                        "max_tokens": 300,
+                        "temperature": 0.1  # Low temperature for accuracy
+                    }
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    translated_text = result['content'][0]['text'].strip()
+                    logger.info(f"Translation successful: '{translated_text[:40]}...'")
+                    return translated_text
+                else:
+                    logger.warning(f"Translation API error: {response.status_code} - {response.text[:100]}")
+                    return text
+                    
+            except Exception as e:
+                logger.warning(f"Error translating text: {e}")
+                return text
+        
+        # Original format_api_response function
+        original_format = api_formatter.format_api_response
+        
+        def patched_format_with_translation(result):
+            """Ensure all text in merged data section is in English."""
+            # First get the formatted result using the existing formatter
+            formatted = original_format(result)
+            
+            # Identify merged data fields (section 05)
+            merged_fields = {k: v for k, v in formatted.items() if k.startswith('05_') and not k.endswith('_source')}
+            
+            # Process each merged field
+            for key, value in merged_fields.items():
+                # Only process string values that are not empty
+                if isinstance(value, str) and value.strip():
+                    # Skip fields that shouldn't be translated
+                    if any(skip in key for skip in ['email', 'website', 'url', 'domain', 'phone']):
+                        continue
+                    
+                    # Detect language
+                    detected_lang = detect_language(value)
+                    
+                    # If not English, translate
+                    if detected_lang != "english":
+                        logger.info(f"Detected {detected_lang} in field {key}, translating")
+                        translated = translate_text(value, detected_lang)
+                        
+                        # Update with translation if successful
+                        if translated and translated != value:
+                            formatted[key] = translated
+                            logger.info(f"Translated {key} to English: '{translated[:40]}...'")
+                            
+                            # Also update the company_description if this is a description field
+                            if key == "05_description" or key == "05_short_description":
+                                formatted["company_description"] = translated
+                                logger.info(f"Updated company_description with translation")
+            
+            return formatted
+        
+        # Apply the patch
+        api_formatter.format_api_response = patched_format_with_translation
+        
+        # Also patch the AI data extraction to ensure we translate any non-English content
+        try:
+            from domain_classifier.enrichment.ai_data_extractor import extract_company_data_from_content
+            
+            original_extract = extract_company_data_from_content
+            
+            def patched_extract_with_translation(content, domain, classification):
+                """Ensure AI-extracted data is translated to English if needed."""
+                # Call original function
+                ai_data = original_extract(content, domain, classification)
+                
+                # Translate fields that might contain non-English text
+                if ai_data:
+                    for field in ['description', 'industry', 'company_description']:
+                        if field in ai_data and ai_data[field] and isinstance(ai_data[field], str):
+                            # Check if translation needed
+                            if detect_language(ai_data[field]) != "english":
+                                ai_data[field] = translate_text(ai_data[field])
+                                logger.info(f"Translated AI-extracted {field} for {domain}")
+                
+                return ai_data
+            
+            # Apply the patch
+            from domain_classifier.enrichment import ai_data_extractor
+            ai_data_extractor.extract_company_data_from_content = patched_extract_with_translation
+            
+            logger.info("✅ Successfully patched AI data extraction to translate non-English content")
+        except Exception as e:
+            logger.error(f"❌ Failed to patch AI data extraction for translation: {e}")
+        
+        logger.info("✅ Successfully applied English translation fix for merged data")
+    except Exception as e:
+        logger.error(f"❌ Failed to apply English translation fix: {e}")
