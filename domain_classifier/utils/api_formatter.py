@@ -1,4 +1,5 @@
-"""API response formatting utilities."""
+"""Modified API formatter to ensure company description and all Apollo fields appear in output."""
+
 import logging
 import json
 from typing import Dict, Any, Optional
@@ -19,7 +20,7 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
     """
     logger.info(f"Input to format_api_response - keys: {list(result.keys())}")
     
-    # For debugging, log core fields if available 
+    # For debugging, log core fields if available
     logger.info(f"Domain: {result.get('domain')}, Email: {result.get('email')}, URL: {result.get('website_url')}")
     
     # For n8n, we want a flat structure with prefixed fields
@@ -30,14 +31,12 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
         """Safely get a value from result using key or alternative_keys."""
         if key in result and result[key] not in [None, ""]:
             return result[key]
-        
         if alternative_keys:
             for alt_key in alternative_keys:
                 if alt_key in result and result[alt_key] not in [None, ""]:
                     return result[alt_key]
-        
         return default
-        
+    
     # ========== UTILITY FUNCTION ==========
     def add_section(prefix, title, fields_dict):
         """Add a section to the flat result with the given prefix and title."""
@@ -47,7 +46,8 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
         
         # Add fields
         for key, value in fields_dict.items():
-            if value not in [None, "", 0, False] or key in ["domain", "email", "website_url", "classification", "final_classification"]:
+            if value not in [None, "", 0, False] or key in ["domain", "email", "website_url", "classification", 
+                                                          "final_classification", "company_description"]:
                 flat_result[f"{prefix}_{key}"] = value
     
     # ========== DOMAIN INFO SECTION ==========
@@ -63,8 +63,9 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
         company_name = result["apollo_data"].get("name", "")
     if not company_name and "ai_company_data" in result and isinstance(result["ai_company_data"], dict):
         company_name = result["ai_company_data"].get("name", "")
-    
+        
     domain_info["company_name"] = company_name
+    
     add_section("01", "DOMAIN INFO", domain_info)
     
     # ========== CLASSIFICATION SECTION ==========
@@ -109,12 +110,16 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
             if value not in [None, "", 0]:
                 ai_info[key] = value
     
+    # CRITICAL: Make sure company_description is included even if it's coming from another source
+    if "company_description" in result and result["company_description"] and "description" not in ai_info:
+        ai_info["description"] = result["company_description"]
+    
     add_section("03", "AI DATA", ai_info)
     
     # ========== APOLLO DATA SECTION ==========
     apollo_info = {}
-    apollo_data = safe_get(result, "apollo_data", {})
     
+    apollo_data = safe_get(result, "apollo_data", {})
     if isinstance(apollo_data, str):
         try:
             apollo_data = json.loads(apollo_data)
@@ -122,6 +127,7 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
             apollo_data = {}
             
     if apollo_data and isinstance(apollo_data, dict):
+        # Include ALL fields from Apollo, not just a subset
         for key, value in apollo_data.items():
             if value not in [None, "", 0]:
                 apollo_info[key] = value
@@ -131,11 +137,14 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
     # ========== MERGED DATA SECTION ==========
     merged_info = {}
     
-    # Define fields to merge with priority
+    # Define fields to merge with priority - expand this list to include new Apollo fields
     fields_to_merge = [
         "name", "industry", "employee_count", "founded_year", 
         "address", "city", "state", "country", "postal_code", "phone", "email",
-        "revenue", "linkedin_url", "website", "funding"
+        "revenue", "linkedin_url", "website", "funding", "primary_domain",
+        "description", "technologies", "specialties", "short_description", 
+        "long_description", "keywords", "tags", "organization_type",
+        "company_type", "social_links"
     ]
     
     for field in fields_to_merge:
@@ -147,6 +156,7 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
         if apollo_data and isinstance(apollo_data, dict) and field in apollo_data and apollo_data[field]:
             value = apollo_data[field]
             source = "apollo"
+        
         # Use AI data as fallback
         elif ai_data and isinstance(ai_data, dict) and field in ai_data and ai_data[field]:
             value = ai_data[field]
@@ -161,6 +171,7 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
     
     # ========== RECOMMENDATIONS SECTION ==========
     rec_info = {}
+    
     recommendations = safe_get(result, "domotz_recommendations", {})
     if recommendations and isinstance(recommendations, dict):
         rec_info["primary_value"] = recommendations.get("primary_value", "")
@@ -180,7 +191,7 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
             
         if "error_detail" in result:
             error_info["error_detail"] = result["error_detail"]
-        
+            
         add_section("07", "ERROR", error_info)
     
     # Handle possible misclassification warnings
@@ -194,7 +205,11 @@ def format_api_response(result: Dict[str, Any]) -> Dict[str, Any]:
             
         if "misclassification_warning" in result:
             misclass_info["misclassification_warning"] = result["misclassification_warning"]
-        
+            
         add_section("08", "MISCLASSIFICATION WARNING", misclass_info)
+    
+    # Add company_description again to ensure it shows up in output
+    if "company_description" in result and result["company_description"]:
+        flat_result["company_description"] = result["company_description"]
     
     return flat_result
