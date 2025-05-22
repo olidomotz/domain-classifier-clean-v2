@@ -1,9 +1,11 @@
-"""Apollo.io connector for company data enrichment with rate limiting."""
+"""Complete Apollo connector with all methods, including search_person."""
+
 import requests
 import logging
 import os
 import json
 import time
+import random
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
 
@@ -24,7 +26,7 @@ class ApolloConnector:
         self.api_key = api_key or os.environ.get("APOLLO_API_KEY")
         if not self.api_key:
             logger.warning("No Apollo API key provided. Enrichment will not be available.")
-        
+            
         self.base_url = "https://api.apollo.io/v1"
         
         # Rate limiting settings
@@ -55,15 +57,16 @@ class ApolloConnector:
         if domain in self._domain_cache:
             timestamp, data = self._domain_cache[domain]
             age = (datetime.now() - timestamp).total_seconds()
+            
             if age < self._cache_expiry:
                 logger.info(f"Using cached Apollo data for {domain} ({int(age/3600)} hours old)")
                 return data
             else:
                 logger.info(f"Cached Apollo data for {domain} expired, refreshing")
-                
+        
         # Check rate limits before making API call
         self._check_rate_limit()
-            
+        
         try:
             # Apollo's organizations/enrich endpoint
             endpoint = f"{self.base_url}/organizations/enrich"
@@ -103,6 +106,7 @@ class ApolloConnector:
                         
                         if data.get('organization'):
                             logger.info(f"Successfully enriched {domain} with Apollo data")
+                            
                             company_data = self._format_company_data(data['organization'])
                             
                             # Cache the result
@@ -116,10 +120,9 @@ class ApolloConnector:
                             # Cache the empty result with a shorter expiry (1 day)
                             empty_result = {"name": domain, "no_data": True}
                             self._domain_cache[domain] = (datetime.now() - timedelta(days=6), empty_result)
-                        
-                        # Exit the retry loop on 200 response
-                        break
-                        
+                            
+                            # Exit the retry loop on 200 response
+                            break
                     else:
                         # Enhanced error logging
                         try:
@@ -136,14 +139,17 @@ class ApolloConnector:
                         retry_delay = self.retry_delay * (2 ** attempt)
                         logger.warning(f"Retrying Apollo API call in {retry_delay} seconds. Attempt {attempt+1}/{max_retries}")
                         time.sleep(retry_delay)
+                
                 except requests.exceptions.Timeout:
                     logger.warning(f"Timeout connecting to Apollo API for {domain} (attempt {attempt+1})")
                     retry_delay = self.retry_delay * (2 ** attempt)
                     time.sleep(retry_delay)
+                
                 except requests.exceptions.ConnectionError:
                     logger.warning(f"Connection error with Apollo API for {domain} (attempt {attempt+1})")
                     retry_delay = self.retry_delay * (2 ** attempt)
                     time.sleep(retry_delay)
+                    
                 except Exception as e:
                     logger.error(f"Error making Apollo API call for {domain}: {e}")
                     retry_delay = self.retry_delay * (2 ** attempt)
@@ -175,7 +181,6 @@ class ApolloConnector:
             # Sleep in smaller increments with logging
             sleep_chunk = 30  # Sleep in 30-second chunks
             remaining = seconds_until_reset
-            
             while remaining > 0:
                 sleep_time = min(sleep_chunk, remaining)
                 time.sleep(sleep_time)
@@ -191,49 +196,52 @@ class ApolloConnector:
     def _format_company_data(self, apollo_data: Dict[str, Any]) -> Dict[str, Any]:
         """Format Apollo data with extended fields."""
         try:
-            # Extract standard fields
-            formatted_data = {
-                "name": apollo_data.get('name'),
-                "website": apollo_data.get('website_url'),
-                "industry": apollo_data.get('industry'),
-                "employee_count": apollo_data.get('estimated_num_employees') or apollo_data.get('employee_count'),
-                "revenue": apollo_data.get('estimated_annual_revenue'),
-                "founded_year": apollo_data.get('founded_year'),
-                "linkedin_url": apollo_data.get('linkedin_url'),
-                "phone": apollo_data.get('phone'),
-                "address": self._format_address(apollo_data),
-                "technologies": apollo_data.get('technologies', []),
-                "description": apollo_data.get('description', ''),
-            }
+            # Extract all available fields for maximum data extraction
+            formatted_data = {}
             
-            # Add extended fields if available
-            extended_fields = [
-                "short_description", 
-                "long_description",
-                "keywords", 
-                "tags",
-                "specialties",
-                "organization_type", 
-                "company_type",
-                "primary_domain",
-                "social_links",
-                "tech_categories",
-                "competitors",
-                "locations",
-                "sic_codes", 
-                "naics_codes"
+            # Core fields (always attempt to extract these)
+            core_fields = [
+                "name", "website_url", "industry", "estimated_num_employees", "employee_count",
+                "estimated_annual_revenue", "founded_year", "linkedin_url", "phone",
+                "technologies", "description", "primary_domain"
             ]
             
-            for field in extended_fields:
-                if apollo_data.get(field):
-                    formatted_data[field] = apollo_data.get(field)
-                    logger.info(f"Found additional Apollo field: {field}")
+            # Extract core fields
+            for field in core_fields:
+                if field in apollo_data and apollo_data[field] is not None:
+                    # Special case for employee_count
+                    if field == "estimated_num_employees":
+                        formatted_data["employee_count"] = apollo_data[field]
+                    # Special case for website
+                    elif field == "website_url":
+                        formatted_data["website"] = apollo_data[field]
+                    # All other fields
+                    else:
+                        formatted_data[field] = apollo_data[field]
+            
+            # Process address separately
+            formatted_data["address"] = self._format_address(apollo_data)
+            
+            # Extended fields - capture everything else that might be available
+            for key, value in apollo_data.items():
+                # Skip fields already processed
+                if key in core_fields or key in ["street_address", "city", "state", "country", "postal_code"]:
+                    continue
+                    
+                # Add all other fields that have values
+                if value is not None and value != "":
+                    formatted_data[key] = value
+                    
+                    # Log new fields that we haven't seen before
+                    if key not in core_fields:
+                        logger.info(f"Found additional Apollo field: {key}")
             
             # Log which fields we actually found
             available_fields = [k for k, v in formatted_data.items() if v]
             logger.info(f"Available Apollo data fields for {apollo_data.get('name', 'Unknown')}: {available_fields}")
             
             return formatted_data
+            
         except Exception as e:
             logger.error(f"Error formatting Apollo data: {e}")
             return {
@@ -259,7 +267,7 @@ class ApolloConnector:
             "country": apollo_data.get('country'),
             "zip": apollo_data.get('postal_code')
         }
-
+        
     def search_person(self, email: str) -> Optional[Dict[str, Any]]:
         """
         Search for a person by email.
@@ -276,7 +284,7 @@ class ApolloConnector:
         
         # Check rate limits before making API call
         self._check_rate_limit()
-            
+        
         try:
             # Apollo's people/search endpoint
             endpoint = f"{self.base_url}/people/search"
@@ -332,10 +340,11 @@ class ApolloConnector:
                         # Don't retry certain error codes
                         if response.status_code in [400, 401, 403]:
                             break
-                            
+                        
                         # For other errors, retry with backoff
                         retry_delay = self.retry_delay * (2 ** attempt)
                         time.sleep(retry_delay)
+                        
                 except Exception as e:
                     logger.error(f"Error during Apollo person search: {e}")
                     retry_delay = self.retry_delay * (2 ** attempt)
@@ -346,7 +355,7 @@ class ApolloConnector:
         except Exception as e:
             logger.error(f"Error searching for person with Apollo: {e}")
             return None
-            
+    
     def _format_person_data(self, person_data: Dict[str, Any]) -> Dict[str, Any]:
         """
         Format person data from Apollo.
