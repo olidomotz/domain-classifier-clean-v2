@@ -104,17 +104,38 @@ def generate_detailed_description(classification: Dict[str, Any],
                                  apollo_data: Optional[Dict] = None,
                                  apollo_person_data: Optional[Dict] = None) -> str:
     """
-    Use Claude to generate a detailed company description without redundancy.
+    Generate a detailed company description without fabricating data when none is available.
     
     Args:
         classification: The classification result
         apollo_data: Optional company data from Apollo
-        apollo_person_data: Optional person data from Apollo (kept for backwards compatibility)
+        apollo_person_data: Optional person data from Apollo
         
     Returns:
-        str: Detailed but non-redundant company description (~100 words)
+        str: Detailed company description or factual statement about lack of data
     """
     try:
+        # Check if this is a "Process Did Not Complete" classification with no data
+        if classification.get("predicted_class") == "Process Did Not Complete":
+            domain = classification.get("domain", "unknown")
+            logger.info(f"Skipping description generation for {domain} - Process Did Not Complete")
+            
+            # Only generate a description if we have Apollo data
+            if not apollo_data or not isinstance(apollo_data, dict) or not apollo_data.get("name"):
+                logger.info(f"No Apollo data available for {domain}, returning minimal description")
+                
+                # Use a simple, factual statement instead of generating a fictional description
+                classification["company_description"] = f"Unable to retrieve information for {domain} due to insufficient data."
+                
+                # Also set a minimal one-liner
+                classification["company_one_line"] = f"No data available for {domain}."
+                
+                return classification.get("company_description", "")
+        
+        # Extract domain and prediction for direct use
+        domain = classification.get('domain', '')
+        predicted_class = classification.get('predicted_class', '')
+        
         # Handle case where apollo_data might be a string (JSON)
         if isinstance(apollo_data, str):
             try:
@@ -130,10 +151,6 @@ def generate_detailed_description(classification: Dict[str, Any],
             except:
                 # If parsing fails, treat as empty dict
                 apollo_person_data = {}
-        
-        # Extract domain and prediction for direct use
-        domain = classification.get('domain', '')
-        predicted_class = classification.get('predicted_class', '')
         
         # CRITICAL: Force company_description into the classification if not present
         if not classification.get("company_description"):
@@ -154,6 +171,12 @@ def generate_detailed_description(classification: Dict[str, Any],
             company_name = apollo_data.get('name')
         else:
             company_name = classification.get('company_name', domain.split('.')[0].capitalize())
+        
+        # Use Apollo short_description if available - this is a reliable factual source
+        if apollo_data and isinstance(apollo_data, dict) and apollo_data.get("short_description"):
+            logger.info(f"Using Apollo short_description for {domain}")
+            classification["company_description"] = apollo_data.get("short_description")
+            return classification["company_description"]
         
         # Build prompt with available information
         prompt = f"""Based on the following information, write a factual company description for {company_name}:
@@ -312,8 +335,8 @@ Write a detailed factual description (~100 words) that focuses on what the compa
             else:
                 logger.error(f"Error calling Claude for description: {response.status_code} - {response.text[:200]}")
                 return classification.get('company_description', '')
-        except Exception as api_error:
-            logger.error(f"Error calling Claude API: {api_error}")
+        except Exception as e:
+            logger.error(f"Error generating description: {e}")
             # Fall back to a constructed description
             return _construct_fallback_description(classification, apollo_data)
     except Exception as e:
@@ -327,12 +350,21 @@ def _construct_fallback_description(classification: Dict[str, Any], apollo_data:
         domain = classification.get('domain', 'unknown')
         predicted_class = classification.get('predicted_class', 'business')
         
+        # Check if this is a "Process Did Not Complete" classification with no Apollo data
+        if predicted_class == "Process Did Not Complete":
+            if not apollo_data or not isinstance(apollo_data, dict) or not apollo_data.get("name"):
+                return f"Unable to retrieve information for {domain} due to insufficient data."
+        
         # Get company name
         company_name = None
         if apollo_data and isinstance(apollo_data, dict) and apollo_data.get('name'):
             company_name = apollo_data.get('name')
         else:
             company_name = domain.split('.')[0].capitalize()
+        
+        # Use Apollo short_description if available
+        if apollo_data and isinstance(apollo_data, dict) and apollo_data.get("short_description"):
+            return apollo_data.get("short_description")
         
         # Create a basic description
         description = f"{company_name} is "
