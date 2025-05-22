@@ -175,7 +175,24 @@ def apply_patches():
 
         def improved_generate_description(classification, apollo_data=None, apollo_person_data=None):
             """Generate a reliable company description."""
-            # First try the original function
+            # Check if this is a "Process Did Not Complete" classification with no data
+            if classification.get("predicted_class") == "Process Did Not Complete":
+                domain = classification.get("domain", "unknown")
+                logger.info(f"Skipping description generation for {domain} - Process Did Not Complete")
+                
+                # Only generate a description if we have Apollo data
+                if not apollo_data or not isinstance(apollo_data, dict) or not apollo_data.get("name"):
+                    logger.info(f"No Apollo data available for {domain}, returning minimal description")
+                    
+                    # Use a simple, factual statement instead of generating a fictional description
+                    classification["company_description"] = f"Unable to retrieve information for {domain} due to insufficient data."
+                    
+                    # Also set a minimal one-liner
+                    classification["company_one_line"] = f"No data available for {domain}."
+                    
+                    return classification.get("company_description", "")
+                
+            # For all other cases or when Apollo data is available, use the original function
             try:
                 description = original_generate(classification, apollo_data, apollo_person_data)
                 
@@ -186,10 +203,15 @@ def apply_patches():
                 return description
             except Exception as e:
                 logger.warning(f"Error in original description generator: {e}, using fallback")
-                
+            
             # Build a fallback description
             domain = classification.get("domain", "unknown")
             predicted_class = classification.get("predicted_class", "business")
+            
+            # For "Process Did Not Complete" with no data, provide minimal info
+            if predicted_class == "Process Did Not Complete":
+                if not apollo_data or not isinstance(apollo_data, dict) or not apollo_data.get("name"):
+                    return f"Unable to retrieve information for {domain} due to insufficient data."
             
             # Get company name
             company_name = None
@@ -243,6 +265,13 @@ def apply_patches():
         
         def improved_enhance_description(basic_description, apollo_data, classification):
             """Ensure company description is enhanced reliably."""
+            # Special handling for "Process Did Not Complete" with no data
+            if classification.get("predicted_class") == "Process Did Not Complete":
+                if not apollo_data or not isinstance(apollo_data, dict) or not apollo_data.get("name"):
+                    domain = classification.get("domain", "unknown")
+                    logger.info(f"Skipping description enhancement for {domain} - No data available")
+                    return f"Unable to retrieve information for {domain} due to insufficient data."
+            
             # Try original function
             try:
                 enhanced = original_enhance(basic_description, apollo_data, classification)
@@ -266,6 +295,9 @@ def apply_patches():
     except Exception as e:
         logger.error(f"❌ Failed to patch description_enhancer: {e}")
 
+    # 6. Add the fix to prevent description fabrication
+    prevent_description_fabrication()
+
     logger.info("Complete classification hierarchy fixes successfully applied")
 
 def disable_cross_validation():
@@ -287,3 +319,42 @@ def disable_cross_validation():
         
     except Exception as e:
         logger.error(f"❌ Failed to disable cross-validation: {e}")
+
+def prevent_description_fabrication():
+    """Prevent generating fictional descriptions for domains with no data."""
+    try:
+        from domain_classifier.utils import api_formatter
+        
+        original_format = api_formatter.format_api_response
+        
+        def patched_format_api_for_no_data(result):
+            # For Process Did Not Complete with no data, ensure description is appropriate
+            if result.get("predicted_class") == "Process Did Not Complete":
+                domain = result.get("domain", "")
+                
+                # If no Apollo data and no content, use a minimal description
+                apollo_data = result.get("apollo_data", {})
+                if not apollo_data or not any(apollo_data.values()):
+                    # Set a clear "no data" description
+                    result["company_description"] = f"Unable to retrieve information for {domain} due to insufficient data."
+                    result["company_one_line"] = f"No data available for {domain}."
+                    
+                    logger.info(f"Set minimal description for {domain} with no data")
+            
+            # Call original format function
+            formatted = original_format(result)
+            
+            # Force company description into output
+            if "company_description" in result:
+                formatted["03_description"] = result["company_description"]
+                logger.info(f"Forced company description into output for {result.get('domain', 'unknown')}")
+            
+            return formatted
+        
+        # Apply the patch
+        api_formatter.format_api_response = patched_format_api_for_no_data
+        
+        logger.info("✅ Applied API formatter fix to handle domains with no data")
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to patch api_formatter for no data handling: {e}")
