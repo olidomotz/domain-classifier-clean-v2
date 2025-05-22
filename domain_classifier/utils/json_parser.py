@@ -1,15 +1,16 @@
-"""Centralized JSON parsing module for domain classifier."""
+"""Enhanced JSON parser that can handle Claude's malformed JSON responses."""
+
 import logging
 import json
 import re
-from typing import Dict, Any, Optional, Union
+from typing import Dict, Any, Optional
 
 # Set up logging
 logger = logging.getLogger(__name__)
 
 def clean_json_string(json_str: str) -> str:
     """
-    Clean a JSON string by removing control characters and fixing common LLM-generated JSON issues.
+    More aggressive cleaning of JSON strings from LLM responses.
     
     Args:
         json_str: The JSON string to clean
@@ -27,16 +28,20 @@ def clean_json_string(json_str: str) -> str:
     json_str = re.sub(r'[\x00-\x1F\x7F]', '', json_str)
     
     # Fix escaped newlines and quotes
-    json_str = re.sub(r'\\n', '\n', json_str)
-    json_str = re.sub(r'\\\"', '\"', json_str)
-    json_str = re.sub(r'\\"', '\"', json_str)
+    json_str = re.sub(r'\\n', '\\n', json_str)
+    json_str = re.sub(r'\\"', '"', json_str)
+    json_str = re.sub(r'\\"', '"', json_str)
     
-    # Handle the problematic pattern: "score": X, 0
-    # This is a critical fix for Claude's output format
+    # CRITICAL FIX: Handle Claude's specific format of double quotes inside quotes
+    # Example: "predicted_class": " "Managed Service Provider"" 
+    json_str = re.sub(r': " "([^"]+)"", ', r': "\1", ', json_str)
+    json_str = re.sub(r': " "([^"]+)""}', r': "\1"}', json_str)
+    
+    # Fix the problematic pattern: "score": X, 0
     json_str = re.sub(r'": (\d+),\s*0([,}])', r'": \1\2', json_str)
     
-    # Handle numbers with commas (like "90, 0" should be "90")
-    json_str = re.sub(r'(\d+),\s*(\d+)(?=,|\s|"|]|}|$)', r'\1\2', json_str)
+    # Fix numbers with commas (like "90, 0" should be "90")
+    json_str = re.sub(r'(\d+),\s*(\d+)(?=,|\s|"|\]|}|$)', r'\1\2', json_str)
     
     # Fix JSON with wrapped quotation marks
     if json_str.startswith('"') and json_str.endswith('"'):
@@ -61,10 +66,27 @@ def clean_json_string(json_str: str) -> str:
     json_str = re.sub(r'::', r':', json_str)
     
     # Fix missing quotes around string values for common fields
-    for field in ["predicted_class", "detection_method", "llm_explanation", "company_description"]:
+    for field in ["predicted_class", "detection_method", "llm_explanation", "company_description", "company_one_line"]:
         json_str = re.sub(
             r'"{0}":\s*([^"{{\[\d][^,}}]+)([,}}])'.format(field),
             r'"{0}": "\1"\2'.format(field),
+            json_str
+        )
+    
+    # Add special handling for internal_it_potential and max_confidence fields
+    # Claude often misformatting these fields
+    for field in ["internal_it_potential", "max_confidence", "confidence_score"]:
+        # Handle float representation (0.X)
+        json_str = re.sub(
+            r'"{0}":\s*([0-9]\.[0-9]+)\s*,'.format(field),
+            r'"{0}": \1,'.format(field),
+            json_str
+        )
+        
+        # Handle integer representation
+        json_str = re.sub(
+            r'"{0}":\s*([0-9]+)\s*,'.format(field),
+            r'"{0}": \1,'.format(field),
             json_str
         )
     
@@ -93,13 +115,14 @@ def extract_json_from_text(text: str) -> Optional[str]:
     """
     if not text:
         return None
-        
-    # First try to find a complete, well-formed JSON object
-    full_json_pattern = r'(\{[\s\S]*\})'
-    full_match = re.search(full_json_pattern, text)
     
+    # First try to find a complete, well-formed JSON object
+    full_json_pattern = r'({[\s\S]*})'
+    
+    full_match = re.search(full_json_pattern, text)
     if full_match:
         json_str = full_match.group(1)
+        
         # Try to parse it directly
         try:
             json.loads(json_str)
@@ -110,15 +133,16 @@ def extract_json_from_text(text: str) -> Optional[str]:
     
     # Try multiple patterns to extract JSON
     json_patterns = [
-        r'(\{[\s\S]*?"predicted_class"[\s\S]*?\})',  # Most common pattern with predicted_class field
-        r'```(?:json)?\s*({[\s\S]*?})\s*```',        # Markdown code blocks
-        r'(\{[\s\S]*?"confidence_scores"[\s\S]*?\})' # Alternative key pattern
+        r'({[\s\S]*?"predicted_class"[\s\S]*?})',  # Most common pattern with predicted_class field
+        r'```(?:json)?\s*({[\s\S]*?})\s*```',  # Markdown code blocks
+        r'({[\s\S]*?"confidence_scores"[\s\S]*?})'  # Alternative key pattern
     ]
     
     for pattern in json_patterns:
         json_match = re.search(pattern, text, re.DOTALL)
         if json_match:
             candidate = json_match.group(1).strip()
+            
             # Verify it at least starts and ends with {} and contains some internal content
             if candidate.startswith('{') and candidate.endswith('}') and len(candidate) > 10:
                 return candidate
@@ -127,6 +151,7 @@ def extract_json_from_text(text: str) -> Optional[str]:
     if '"predicted_class"' in text and '"confidence_scores"' in text:
         start_idx = text.find('{')
         end_idx = text.rfind('}')
+        
         if start_idx >= 0 and end_idx > start_idx:
             partial_json = text[start_idx:end_idx+1]
             return partial_json
@@ -155,23 +180,29 @@ def extract_predicted_class_from_text(text: str) -> Optional[str]:
     """
     if not text:
         return None
-        
+    
     # First, try JSON-like pattern
     class_match = re.search(r'"predicted_class"\s*:\s*"([^"]+)"', text)
     if class_match:
         return class_match.group(1)
-        
+    
     # Try alternative JSON-like pattern without quotes
-    alt_match = re.search(r'predicted_class["\s:]*([A-Za-z\s\-]+)[",}]', text)
+    alt_match = re.search(r'predicted_class["\\s:]*([A-Za-z\\s\\-]+)[",}]', text)
     if alt_match:
         return alt_match.group(1).strip()
-        
+    
+    # Handle special case: double quoted values from Claude
+    double_quote_match = re.search(r'"predicted_class"\s*:\s*"\s*"([^"]+)"\s*"', text)
+    if double_quote_match:
+        return double_quote_match.group(1)
+    
     # Look for specific class mentions in common phrases
     class_types = [
         "Managed Service Provider",
-        "Integrator - Commercial A/V", 
+        "Integrator - Commercial A/V",
         "Integrator - Residential A/V",
-        "Internal IT Department"
+        "Internal IT Department",
+        "Parked Domain"
     ]
     
     for class_type in class_types:
@@ -181,10 +212,11 @@ def extract_predicted_class_from_text(text: str) -> Optional[str]:
             rf"appears to be (?:a |an )?{class_type}",
             rf"identified as (?:a |an )?{class_type}"
         ]
+        
         for pattern in patterns:
             if re.search(pattern, text, re.IGNORECASE):
                 return class_type
-                
+    
     # Check for specific MSP indicators
     msp_indicators = [
         r"provides (IT|technology) services to (other|multiple|various) (companies|businesses|organizations)",
@@ -214,7 +246,7 @@ def parse_and_validate_json(json_str: str, context: str = "") -> Optional[Dict[s
     if not json_str:
         logger.warning(f"Empty JSON string provided for parsing {context}")
         return None
-    
+        
     try:
         # First attempt with standard JSON parsing
         try:
@@ -224,40 +256,39 @@ def parse_and_validate_json(json_str: str, context: str = "") -> Optional[Dict[s
         except json.JSONDecodeError as e:
             logger.warning(f"Initial JSON parsing failed {context}: {e}")
             
-        # Try with cleaning
-        cleaned_json = clean_json_string(json_str)
-        try:
-            parsed_json = json.loads(cleaned_json)
-            logger.info(f"Successfully parsed JSON after cleaning {context}")
-            return parsed_json
-        except json.JSONDecodeError as e:
-            logger.warning(f"JSON parsing failed after cleaning {context}: {e}")
-            
-            # Try ultra-aggressive cleaning as a last resort
-            ultra_clean = re.sub(r'[^\x20-\x7E]', '', cleaned_json)
+            # Try with cleaning
+            cleaned_json = clean_json_string(json_str)
             try:
-                parsed_json = json.loads(ultra_clean)
-                logger.info(f"Successfully parsed JSON after ultra cleaning {context}")
+                parsed_json = json.loads(cleaned_json)
+                logger.info(f"Successfully parsed JSON after cleaning {context}")
                 return parsed_json
             except json.JSONDecodeError as e:
-                # Log detailed error information for debugging
-                position = e.pos if hasattr(e, 'pos') else -1
-                if position >= 0:
-                    context_start = max(0, position - 30)
-                    context_end = min(len(cleaned_json), position + 30)
-                    error_context = cleaned_json[context_start:context_end]
-                    logger.error(f"Final JSON parsing failed {context} at position {position}: {e}")
-                    logger.error(f"Context near error: '{error_context}'")
-                else:
-                    logger.error(f"Final JSON parsing failed {context}: {e}")
+                logger.warning(f"JSON parsing failed after cleaning {context}: {e}")
                 
-                return None
-                
+                # Try ultra-aggressive cleaning as a last resort
+                ultra_clean = re.sub(r'[^\x20-\x7E]', '', cleaned_json)
+                try:
+                    parsed_json = json.loads(ultra_clean)
+                    logger.info(f"Successfully parsed JSON after ultra cleaning {context}")
+                    return parsed_json
+                except json.JSONDecodeError as e:
+                    # Log detailed error information for debugging
+                    position = e.pos if hasattr(e, 'pos') else -1
+                    if position >= 0:
+                        context_start = max(0, position - 30)
+                        context_end = min(len(cleaned_json), position + 30)
+                        error_context = cleaned_json[context_start:context_end]
+                        logger.error(f"Final JSON parsing failed {context} at position {position}: {e}")
+                        logger.error(f"Context near error: '{error_context}'")
+                    else:
+                        logger.error(f"Final JSON parsing failed {context}: {e}")
+                        
+                    return None
     except Exception as e:
         logger.error(f"Unexpected error parsing JSON {context}: {e}")
         return None
-        
-def ensure_dict(data: Union[Dict[str, Any], str, None], field_name: str = "unknown") -> Dict[str, Any]:
+
+def ensure_dict(data: Dict[str, Any], field_name: str = "unknown") -> Dict[str, Any]:
     """
     Ensure that data is a dictionary, parsing it if it's a string.
     
@@ -276,7 +307,7 @@ def ensure_dict(data: Union[Dict[str, Any], str, None], field_name: str = "unkno
         
     if isinstance(data, str):
         return parse_and_validate_json(data, context=field_name) or {}
-            
+        
     # For any other type, return an empty dict
     logger.warning(f"{field_name} is not a dict or string, but {type(data)}")
     return {}
