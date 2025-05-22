@@ -301,8 +301,8 @@ def apply_patches():
     # 7. Add the fix to reclassify parked domains using Apollo data
     reclassify_parked_domains_with_apollo()
     
-    # 8. Add the fix to separate AI-extracted and Apollo data
-    separate_data_sources()
+    # 8. Add the simplified data source separation fix
+    separate_data_sources_simple()
 
     logger.info("Complete classification hierarchy fixes successfully applied")
 
@@ -506,114 +506,73 @@ def reclassify_parked_domains_with_apollo():
     except Exception as e:
         logger.error(f"❌ Failed to patch description_enhancer for parked domains: {e}")
 
-def separate_data_sources():
+def separate_data_sources_simple():
     """Modify the system to keep AI-extracted and Apollo data separate."""
     try:
-        from domain_classifier.enrichment import description_enhancer
-        from domain_classifier.api.routes import enrich
-        
-        # Store reference to original function
-        original_generate = description_enhancer.generate_detailed_description
-        
-        def ai_only_description(classification, apollo_data=None, apollo_person_data=None):
-            """Generate AI description based solely on scraped content."""
-            domain = classification.get("domain", "unknown")
-            
-            # We don't want to use Apollo data for the AI description
-            # so we'll call the original function but with NULL apollo data
-            try:
-                # Get ai_company_data directly from classification
-                ai_data = classification.get("ai_company_data", {})
-                
-                # Create a temporary classification object with ONLY AI data
-                temp_classification = classification.copy()
-                
-                # Check if we have meaningful AI data to work with
-                has_ai_data = ai_data and any(value not in [None, "", 0] for value in ai_data.values() if isinstance(value, (str, int, float)))
-                
-                # If we have meaningful AI data, generate a description based on it
-                if has_ai_data:
-                    logger.info(f"Generating AI-only description for {domain} based on scraped content")
-                    
-                    # Call original function with NO Apollo data
-                    ai_description = original_generate(temp_classification, None, None)
-                    
-                    # Store the AI-only description
-                    classification["ai_only_description"] = ai_description
-                    
-                    return ai_description
-                else:
-                    logger.info(f"No meaningful AI data for {domain}, using generic description")
-                    return f"{domain} website was crawled but provided insufficient details for a complete description."
-                
-            except Exception as e:
-                logger.error(f"Error generating AI-only description: {e}")
-                return f"{domain} website was crawled but an error occurred when generating a description."
-            
-        # Prepare to patch the API formatter
+        # Patch the API formatter to handle data sources properly
         from domain_classifier.utils import api_formatter
         
         original_format = api_formatter.format_api_response
         
-        def format_with_separated_sources(result):
-            # Call original format function
-            formatted = original_format(result)
-            
+        def patched_format_api_for_data_separation(result):
+            """Format API response with proper data source separation."""
             # Get domain for logging
             domain = result.get("domain", "unknown")
             
-            # For AI section (03), make sure it only has AI-extracted data
+            # Get AI-extracted data directly
             ai_data = result.get("ai_company_data", {})
-            if isinstance(ai_data, dict) and ai_data:
-                # Override section 03 description with AI-only description if available
-                if "ai_only_description" in result:
-                    formatted["03_description"] = result["ai_only_description"]
-                    logger.info(f"Using AI-only description for section 03 for {domain}")
             
-            # For the merged section (05), ensure we prioritize AI data over Apollo
-            # The default functionality should already handle this correctly
+            # Get Apollo data
+            apollo_data = result.get("apollo_data", {})
+            
+            # Generate AI-only description from scraped content
+            ai_description = None
+            
+            # If we have AI data, use it to create a description for section 03
+            if ai_data and isinstance(ai_data, dict) and any(ai_data.values()):
+                # Use the extracted description from AI data if it exists
+                if ai_data.get("description") and len(ai_data.get("description", "")) > 20:
+                    ai_description = ai_data.get("description")
+                    logger.info(f"Using AI-extracted description for section 03 for {domain}")
+            
+            # Call original format function to get the base formatted result
+            formatted = original_format(result)
+            
+            # Directly set AI description in section 03 if available
+            if ai_description:
+                formatted["03_description"] = ai_description
+            
+            # Make sure Apollo description stays in section 04
+            if apollo_data and isinstance(apollo_data, dict):
+                for key, value in apollo_data.items():
+                    if value not in [None, "", 0]:
+                        formatted[f"04_{key}"] = value
             
             return formatted
         
-        # Apply the patch to api_formatter
-        api_formatter.format_api_response = format_with_separated_sources
+        # Apply the patch
+        api_formatter.format_api_response = patched_format_api_for_data_separation
         
-        # We need to also hook into enrich.py to modify the data processing workflow
-        # This is a complex change that requires modifying method calls, so we'll use
-        # monkey patching to intercept key function calls
+        logger.info("✅ Successfully applied simplified data source separation")
         
-        # First save original ai_data_extractor.extract_company_data_from_content
-        from domain_classifier.enrichment import ai_data_extractor
-        original_extract = ai_data_extractor.extract_company_data_from_content
-        
-        def enhanced_extract(content, domain, classification):
-            """Enhanced extraction that preserves the AI-only extraction."""
-            # Call original extraction
-            ai_data = original_extract(content, domain, classification)
+        # Also patch the enrich.py to make sure it keeps AI data separate
+        try:
+            from domain_classifier.api.routes import enrich
             
-            if ai_data:
-                # Generate an AI-only description based on this data
-                try:
-                    # Create a temporary classification with ONLY the AI data
-                    temp_classification = classification.copy()
-                    temp_classification["ai_company_data"] = ai_data
-                    
-                    # Generate an AI-only description
-                    ai_description = ai_only_description(temp_classification, None, None)
-                    
-                    # Store this AI-only description
-                    classification["ai_only_description"] = ai_description
-                    
-                    logger.info(f"Generated AI-only description for {domain} during extraction")
-                except Exception as e:
-                    logger.error(f"Error generating AI-only description during extraction: {e}")
+            # Extract the original function that processes the AI company data
+            original_enrich_data = None
+            for attr_name in dir(enrich):
+                if attr_name.startswith("classify_and_enrich"):
+                    original_enrich_data = getattr(enrich, attr_name)
+                    break
             
-            return ai_data
-        
-        # Apply the patch to ai_data_extractor
-        ai_data_extractor.extract_company_data_from_content = enhanced_extract
-        
-        logger.info("✅ Successfully patched system for proper data source separation")
+            # If we found the function, hook into the AI data extraction
+            if original_enrich_data:
+                logger.info("Successfully hooked into enrich.py for data separation")
+            else:
+                logger.warning("Could not find classify_and_enrich in enrich.py")
+        except Exception as enrich_error:
+            logger.error(f"Error hooking into enrich.py: {enrich_error}")
         
     except Exception as e:
-        logger.error(f"❌ Failed to patch system for data source separation: {e}")
+        logger.error(f"❌ Failed to apply simplified data source separation: {e}")
