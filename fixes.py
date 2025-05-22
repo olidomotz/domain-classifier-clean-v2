@@ -11,6 +11,10 @@ This script fixes all classification inconsistencies by implementing a clear pri
 import logging
 import re
 import json
+import os
+import requests
+import importlib.util
+import sys
 from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -127,6 +131,10 @@ def apply_patches():
             if "company_description" in result:
                 formatted["company_description"] = result["company_description"]
                 logger.info(f"Forced company description into output for {domain}")
+                
+            # CRITICAL: Force final_classification for Process Did Not Complete
+            if predicted_class == "Process Did Not Complete":
+                formatted["02_final_classification"] = "8-Unknown/No Data"
 
             return formatted
 
@@ -145,6 +153,11 @@ def apply_patches():
 
         def patched_determine_final_classification(result):
             domain = result.get("domain", "")
+
+            # CRITICAL ADDITION: Check first for Process Did Not Complete
+            if result.get("predicted_class") == "Process Did Not Complete":
+                logger.info(f"Process Did Not Complete detected for {domain}, using special classification")
+                return "8-Unknown/No Data"
 
             # Check for IT Solutions domains
             if domain and ("it" in domain.lower() or "tech" in domain.lower()) and "solution" in domain.lower():
@@ -182,6 +195,8 @@ def apply_patches():
                     classification["company_description"] = f"Unable to retrieve information for {domain} due to insufficient data."
                     # Also set a minimal one-liner
                     classification["company_one_line"] = f"No data available for {domain}."
+                    # CRITICAL: Set the final_classification directly
+                    classification["final_classification"] = "8-Unknown/No Data"
                     return classification.get("company_description", "")
 
             # For all other cases or when Apollo data is available, use the original function
@@ -200,6 +215,8 @@ def apply_patches():
                 # For "Process Did Not Complete" with no data, provide minimal info
                 if predicted_class == "Process Did Not Complete":
                     if not apollo_data or not isinstance(apollo_data, dict) or not apollo_data.get("name"):
+                        # CRITICAL: Set the final_classification directly
+                        classification["final_classification"] = "8-Unknown/No Data"
                         return f"Unable to retrieve information for {domain} due to insufficient data."
 
                 # Get company name
@@ -258,6 +275,8 @@ def apply_patches():
                 if not apollo_data or not isinstance(apollo_data, dict) or not apollo_data.get("name"):
                     domain = classification.get("domain", "unknown")
                     logger.info(f"Skipping description enhancement for {domain} - No data available")
+                    # CRITICAL: Set the final_classification directly
+                    classification["final_classification"] = "8-Unknown/No Data"
                     return f"Unable to retrieve information for {domain} due to insufficient data."
 
             # Try original function
@@ -291,10 +310,13 @@ def apply_patches():
     # 9. Add the improved description separation fix to properly handle AI and Apollo descriptions
     fix_description_separation()
     
-    # 10. Fix Process Did Not Complete classification to use Unknown/No Data for domains with no data
+    # 10. Apply DIRECT fix for Process Did Not Complete classification
     fix_process_did_not_complete_classification()
     
-    # 11. Ensure all text in merged data is in English
+    # 11. Fix the classify routes to handle empty content properly
+    fix_classify_routes_for_empty_content()
+    
+    # 12. Ensure all text in merged data is in English
     ensure_english_data()
 
     logger.info("Complete classification hierarchy fixes successfully applied")
@@ -331,6 +353,9 @@ def prevent_description_fabrication():
             if result.get("predicted_class") == "Process Did Not Complete":
                 domain = result.get("domain", "")
                 
+                # CRITICAL NEW ADDITION: Force final_classification to be "8-Unknown/No Data"
+                result["final_classification"] = "8-Unknown/No Data"
+                
                 # If no Apollo data and no content, use a minimal description
                 apollo_data = result.get("apollo_data", {})
                 if not apollo_data or not any(apollo_data.values()):
@@ -346,6 +371,10 @@ def prevent_description_fabrication():
             if "company_description" in result:
                 formatted["company_description"] = result["company_description"]
                 logger.info(f"Forced company description into output for {result.get('domain', 'unknown')}")
+                
+            # CRITICAL NEW ADDITION: Force final_classification in formatted result
+            if result.get("predicted_class") == "Process Did Not Complete":
+                formatted["02_final_classification"] = "8-Unknown/No Data"
 
             return formatted
 
@@ -365,6 +394,11 @@ def reclassify_parked_domains_with_apollo():
 
         def enhanced_final_classification(result):
             """Enhanced final classification that uses Apollo data to reclassify parked domains."""
+            # CRITICAL ADDITION: Check first for Process Did Not Complete
+            if result.get("predicted_class") == "Process Did Not Complete":
+                logger.info(f"Process Did Not Complete detected for {result.get('domain', 'unknown')}, using special classification")
+                return "8-Unknown/No Data"
+                
             # Check if this is a parked domain
             if result.get("is_parked", False) or result.get("predicted_class") == "Parked Domain":
                 # Check if Apollo data is available
@@ -541,6 +575,10 @@ def separate_data_sources_simple():
             if "company_description" in result:
                 formatted["company_description"] = result["company_description"]
                 logger.info(f"Forced company description into output for {domain}")
+                
+            # CRITICAL: Force final_classification for Process Did Not Complete
+            if result.get("predicted_class") == "Process Did Not Complete":
+                formatted["02_final_classification"] = "8-Unknown/No Data"
 
             return formatted
 
@@ -570,6 +608,10 @@ def fix_description_separation():
             domain = result.get("domain", "unknown")
             predicted_class = result.get("predicted_class", "")
             company_name = result.get("company_name", domain.split('.')[0].capitalize())
+            
+            # CRITICAL: Force final_classification for Process Did Not Complete
+            if predicted_class == "Process Did Not Complete":
+                result["final_classification"] = "8-Unknown/No Data"
             
             # Keep original company description for reference
             original_company_description = result.get("company_description", "")
@@ -691,6 +733,10 @@ def fix_description_separation():
             formatted["company_description"] = original_company_description
             logger.info(f"Forced company description into output for {domain}")
             
+            # CRITICAL: Force final_classification for Process Did Not Complete
+            if predicted_class == "Process Did Not Complete":
+                formatted["02_final_classification"] = "8-Unknown/No Data"
+            
             return formatted
         
         # Apply the patch
@@ -773,87 +819,229 @@ def fix_description_separation():
 
 def fix_process_did_not_complete_classification():
     """
-    Fix to properly classify domains with 'Process Did Not Complete' status.
+    Direct fix to properly classify domains with 'Process Did Not Complete' status.
     This ensures they don't get incorrectly labeled as 'Internal IT'.
     """
-    logger.info("Applying fix for Process Did Not Complete classification...")
+    logger.info("Applying direct fix for Process Did Not Complete classification...")
     
     try:
-        from domain_classifier.utils import final_classification
+        # Import the module directly
+        import importlib.util
+        import sys
         
-        original_determine = final_classification.determine_final_classification
+        # Path to the module file
+        module_path = "domain_classifier/utils/final_classification.py"
         
-        def patched_determine_final_classification(result):
-            """Enhanced final classification that handles Process Did Not Complete properly."""
-            domain = result.get("domain", "")
+        # Load the module
+        spec = importlib.util.spec_from_file_location("final_classification", module_path)
+        if spec:
+            final_classification = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(final_classification)
             
-            # First check if this is a Process Did Not Complete case
-            if result.get("predicted_class") == "Process Did Not Complete":
-                # Check if we have any meaningful data
-                apollo_data = result.get("apollo_data", {})
-                ai_data = result.get("ai_company_data", {})
+            # Store the original function
+            original_determine = final_classification.determine_final_classification
+            
+            # Define our patched version
+            def patched_determine_final_classification(result):
+                """Directly patched version that handles Process Did Not Complete properly."""
+                # Get the domain for logging
+                domain = result.get("domain", "unknown")
                 
-                # If we have Apollo data, use it to determine classification
-                if apollo_data and isinstance(apollo_data, dict) and any(apollo_data.values()):
-                    logger.info(f"Process Did Not Complete for {domain} but has Apollo data")
-                    
-                    # Try to infer class from industry
-                    industry = apollo_data.get("industry", "").lower() if isinstance(apollo_data.get("industry"), str) else ""
-                    
-                    # If it's in IT/tech industry, classify as MSP
-                    if any(term in industry for term in ["information technology", "it service", "tech", "computer", "software", "cloud", "cyber", "network"]):
-                        logger.info(f"Classifying as MSP based on Apollo industry: {industry}")
-                        return "1-MSP"
-                    
-                    # Otherwise default to Internal IT
-                    logger.info(f"Classifying as Internal IT based on Apollo data with industry: {industry}")
-                    return "2-Internal IT"
-                    
-                # If we don't have meaningful data, use a special classification
-                logger.info(f"No data available for {domain} with Process Did Not Complete status")
-                return "8-Unknown/No Data"
-            
-            # For all other cases, use the original function
-            return original_determine(result)
-        
-        # Apply the patch
-        final_classification.determine_final_classification = patched_determine_final_classification
-        
-        logger.info("✅ Successfully patched final_classification to handle Process Did Not Complete properly")
-        
-        # Now also ensure the API formatter knows about the new classification code
-        try:
-            from domain_classifier.utils import api_formatter
-            
-            original_format = api_formatter.format_api_response
-            
-            def patched_formatter_with_unknown(result):
-                """Update API formatter to handle Unknown/No Data classification."""
-                # Get the formatted result from the current formatter
-                formatted = original_format(result)
-                
-                # Check if this is a "Process Did Not Complete" with no data
+                # Handle Process Did Not Complete as a special case
                 if result.get("predicted_class") == "Process Did Not Complete":
-                    # Update the final classification display
-                    if result.get("final_classification") == "8-Unknown/No Data":
-                        formatted["02_final_classification"] = "8-Unknown/No Data"
-                        
-                        # Also ensure we have a clear description
-                        domain = result.get("domain", "unknown")
-                        formatted["03_description"] = f"Unable to retrieve information for {domain} due to insufficient data."
-                        formatted["company_description"] = f"Unable to retrieve information for {domain} due to insufficient data."
+                    logger.info(f"No data available for {domain} with Process Did Not Complete status")
+                    return "8-Unknown/No Data"  # Return our special classification
                 
-                return formatted
-                
-            # Apply the patch
-            api_formatter.format_api_response = patched_formatter_with_unknown
+                # For all other cases, use the original function
+                return original_determine(result)
             
-            logger.info("✅ Successfully patched api_formatter to handle Unknown/No Data classification")
-        except Exception as e:
-            logger.error(f"❌ Failed to patch api_formatter for Unknown/No Data classification: {e}")
+            # Apply the patch directly to the module
+            final_classification.determine_final_classification = patched_determine_final_classification
+            
+            # Re-register in sys.modules to make sure it's used
+            sys.modules["domain_classifier.utils.final_classification"] = final_classification
+            
+            # Also try to patch it the standard way
+            try:
+                from domain_classifier.utils import final_classification as fc
+                fc.determine_final_classification = patched_determine_final_classification
+                logger.info("Applied patch via import")
+            except Exception as e:
+                logger.error(f"Failed to apply standard patch: {e}")
+            
+            logger.info("✅ Successfully applied direct fix for Process Did Not Complete classification")
+            
+            # Now patch the API formatter to display the new classification properly
+            try:
+                from domain_classifier.utils import api_formatter
+                
+                original_format = api_formatter.format_api_response
+                
+                def patched_formatter_with_unknown(result):
+                    """Update API formatter to handle Unknown/No Data classification."""
+                    # Get the formatted result from the current formatter
+                    formatted = original_format(result)
+                    
+                    # Check if this is a "Process Did Not Complete" with no data
+                    if result.get("predicted_class") == "Process Did Not Complete":
+                        # Update the final classification display
+                        if result.get("final_classification") == "8-Unknown/No Data":
+                            formatted["02_final_classification"] = "8-Unknown/No Data"
+                            
+                            # Also ensure we have a clear description
+                            domain = result.get("domain", "unknown")
+                            formatted["03_description"] = f"Unable to retrieve information for {domain} due to insufficient data."
+                            formatted["company_description"] = f"Unable to retrieve information for {domain} due to insufficient data."
+                        else:
+                            # Force it even if it wasn't set earlier
+                            formatted["02_final_classification"] = "8-Unknown/No Data"
+                            result["final_classification"] = "8-Unknown/No Data"
+                    
+                    return formatted
+                    
+                # Apply the patch
+                api_formatter.format_api_response = patched_formatter_with_unknown
+                
+                logger.info("✅ Successfully patched api_formatter to handle Unknown/No Data classification")
+            except Exception as e:
+                logger.error(f"❌ Failed to patch api_formatter for Unknown/No Data classification: {e}")
+        else:
+            logger.error("Could not create spec for final_classification module")
         
     except Exception as e:
         logger.error(f"❌ Failed to apply Process Did Not Complete classification fix: {e}")
+
+def fix_classify_routes_for_empty_content():
+    """
+    Fix the classify routes to properly handle cases where a domain returns a 200 status
+    but has no actual content. This ensures proper "Process Did Not Complete" classification.
+    """
+    logger.info("Applying fix for classify routes to handle empty content...")
+    
+    try:
+        # Try to patch the classify_domain function in routes/classify.py
+        import importlib.util
+        import sys
+        
+        # Path to the module file
+        module_path = "domain_classifier/api/routes/classify.py"
+        
+        # Load the module
+        spec = importlib.util.spec_from_file_location("classify", module_path)
+        if spec:
+            classify_module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(classify_module)
+            
+            # Find the function that does the final classification
+            if hasattr(classify_module, "classify_domain"):
+                original_classify_domain = classify_module.classify_domain
+                
+                # Create a wrapper around the original function
+                def patched_classify_domain(*args, **kwargs):
+                    """
+                    Patched version that ensures empty content gets properly classified.
+                    """
+                    # Call the original function
+                    result, status_code = original_classify_domain(*args, **kwargs)
+                    
+                    # Check if this is a Process Did Not Complete result
+                    if isinstance(result, dict) and result.get("predicted_class") == "Process Did Not Complete":
+                        # Force final_classification to be 8-Unknown/No Data
+                        result["final_classification"] = "8-Unknown/No Data"
+                        logger.info(f"Set final_classification to 8-Unknown/No Data for {result.get('domain', 'unknown')}")
+                    
+                    return result, status_code
+                
+                # Apply the patch
+                classify_module.classify_domain = patched_classify_domain
+                
+                # Re-register in sys.modules
+                sys.modules["domain_classifier.api.routes.classify"] = classify_module
+                
+                # Try to patch via import as well
+                try:
+                    from domain_classifier.api.routes import classify
+                    classify.classify_domain = patched_classify_domain
+                    logger.info("Applied classify_domain patch via import")
+                except Exception as e:
+                    logger.error(f"Failed to apply classify_domain patch via import: {e}")
+                
+                logger.info("✅ Successfully patched classify_domain to handle empty content")
+            else:
+                logger.warning("Could not find classify_domain function to patch")
+            
+            # Also patch the classify_and_enrich function in routes/enrich.py
+            try:
+                # Path to the module file
+                module_path = "domain_classifier/api/routes/enrich.py"
+                
+                # Load the module
+                spec = importlib.util.spec_from_file_location("enrich", module_path)
+                if spec:
+                    enrich_module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(enrich_module)
+                    
+                    # Find the function that does the classification and enrichment
+                    if hasattr(enrich_module, "classify_and_enrich"):
+                        original_classify_and_enrich = enrich_module.classify_and_enrich
+                        
+                        # Create a wrapper around the original function
+                        def patched_classify_and_enrich(*args, **kwargs):
+                            """
+                            Patched version that ensures Process Did Not Complete gets proper classification.
+                            """
+                            # Call the original function to get the result
+                            result = original_classify_and_enrich(*args, **kwargs)
+                            
+                            # Check if it's a jsonify result by looking at its data attribute
+                            if hasattr(result, 'data'):
+                                import json
+                                try:
+                                    # Parse the JSON data
+                                    data = json.loads(result.data)
+                                    
+                                    # Check for Process Did Not Complete
+                                    if data.get("02_classification") == "Process Did Not Complete":
+                                        # Modify the data to set the final classification
+                                        data["02_final_classification"] = "8-Unknown/No Data"
+                                        
+                                        # Replace the result data
+                                        from flask import jsonify
+                                        new_result = jsonify(data)
+                                        result.data = new_result.data
+                                        
+                                        logger.info(f"Fixed final classification in classify_and_enrich response")
+                                except Exception as e:
+                                    logger.error(f"Error modifying classify_and_enrich response: {e}")
+                            
+                            return result
+                        
+                        # Apply the patch
+                        enrich_module.classify_and_enrich = patched_classify_and_enrich
+                        
+                        # Re-register in sys.modules
+                        sys.modules["domain_classifier.api.routes.enrich"] = enrich_module
+                        
+                        # Try to patch via import as well
+                        try:
+                            from domain_classifier.api.routes import enrich
+                            enrich.classify_and_enrich = patched_classify_and_enrich
+                            logger.info("Applied classify_and_enrich patch via import")
+                        except Exception as e:
+                            logger.error(f"Failed to apply classify_and_enrich patch via import: {e}")
+                        
+                        logger.info("✅ Successfully patched classify_and_enrich to handle Process Did Not Complete")
+                    else:
+                        logger.warning("Could not find classify_and_enrich function to patch")
+                else:
+                    logger.error("Could not create spec for enrich module")
+            except Exception as e:
+                logger.error(f"❌ Failed to patch classify_and_enrich: {e}")
+        else:
+            logger.error("Could not create spec for classify module")
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to apply fix for classify routes: {e}")
 
 def ensure_english_data():
     """
