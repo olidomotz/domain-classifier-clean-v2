@@ -70,7 +70,6 @@ def apply_patches():
         domain_analysis.analyze_domain_words = patched_analyze_domain_words
 
         logger.info("✅ Successfully patched domain_analysis.analyze_domain_words to detect IT solutions")
-
     except Exception as e:
         logger.error(f"❌ Failed to patch domain_analysis: {e}")
 
@@ -107,7 +106,6 @@ def apply_patches():
                     description += " The company has internal IT needs rather than providing technology services to others."
 
                 result["company_description"] = description
-
                 logger.info(f"Added emergency fallback description for {domain}")
 
             # Check for potential misclassifications
@@ -127,7 +125,7 @@ def apply_patches():
 
             # Force company description into output
             if "company_description" in result:
-                formatted["03_description"] = result["company_description"]
+                formatted["company_description"] = result["company_description"]
                 logger.info(f"Forced company description into output for {domain}")
 
             return formatted
@@ -136,7 +134,6 @@ def apply_patches():
         api_formatter.format_api_response = patched_format_api
 
         logger.info("✅ Successfully patched api_formatter.format_api_response to add misclassification warnings")
-
     except Exception as e:
         logger.error(f"❌ Failed to patch api_formatter: {e}")
 
@@ -162,7 +159,6 @@ def apply_patches():
         final_classification.determine_final_classification = patched_determine_final_classification
 
         logger.info("✅ Successfully patched final_classification.determine_final_classification for IT Solutions domains")
-
     except Exception as e:
         logger.error(f"❌ Failed to patch final_classification: {e}")
 
@@ -179,90 +175,82 @@ def apply_patches():
             if classification.get("predicted_class") == "Process Did Not Complete":
                 domain = classification.get("domain", "unknown")
                 logger.info(f"Skipping description generation for {domain} - Process Did Not Complete")
-                
                 # Only generate a description if we have Apollo data
                 if not apollo_data or not isinstance(apollo_data, dict) or not apollo_data.get("name"):
                     logger.info(f"No Apollo data available for {domain}, returning minimal description")
-                    
                     # Use a simple, factual statement instead of generating a fictional description
                     classification["company_description"] = f"Unable to retrieve information for {domain} due to insufficient data."
-                    
                     # Also set a minimal one-liner
                     classification["company_one_line"] = f"No data available for {domain}."
-                    
                     return classification.get("company_description", "")
-                
+
             # For all other cases or when Apollo data is available, use the original function
             try:
                 description = original_generate(classification, apollo_data, apollo_person_data)
-                
                 # Check if description is too short or empty
                 if not description or len(description) < 30:
                     raise ValueError("Description too short, using fallback")
-                    
                 return description
             except Exception as e:
                 logger.warning(f"Error in original description generator: {e}, using fallback")
-            
-            # Build a fallback description
-            domain = classification.get("domain", "unknown")
-            predicted_class = classification.get("predicted_class", "business")
-            
-            # For "Process Did Not Complete" with no data, provide minimal info
-            if predicted_class == "Process Did Not Complete":
-                if not apollo_data or not isinstance(apollo_data, dict) or not apollo_data.get("name"):
-                    return f"Unable to retrieve information for {domain} due to insufficient data."
-            
-            # Get company name
-            company_name = None
-            if apollo_data and isinstance(apollo_data, dict) and apollo_data.get("name"):
-                company_name = apollo_data.get("name")
-            else:
-                company_name = domain.split(".")[0].capitalize()
-                
-            # Create a basic description
-            description = f"{company_name} is "
-            
-            if predicted_class == "Managed Service Provider":
-                description += "a Managed Service Provider"
-            elif predicted_class == "Integrator - Commercial A/V":
-                description += "a Commercial A/V Integrator"
-            elif predicted_class == "Integrator - Residential A/V":
-                description += "a Residential A/V Integrator"
-            else:  # Internal IT
-                description += "a business"
-            
-            # Add industry if available
-            if apollo_data and isinstance(apollo_data, dict) and apollo_data.get("industry"):
-                description += f" in the {apollo_data.get('industry')} industry"
-            
-            description += "."
-            
-            # Add employee count if available
-            if apollo_data and isinstance(apollo_data, dict) and apollo_data.get("employee_count"):
-                description += f" They have approximately {apollo_data.get('employee_count')} employees."
-            
-            # Add service descriptions based on class
-            if predicted_class == "Managed Service Provider":
-                description += " They provide IT services, technology support, and managed solutions to their clients."
-            elif predicted_class == "Integrator - Commercial A/V":
-                description += " They provide audio-visual systems and integration services for commercial environments."
-            elif predicted_class == "Integrator - Residential A/V":
-                description += " They provide home automation and entertainment systems for residential clients."
-            
-            logger.info(f"Created fallback description for {domain}")
-            
-            # Make sure the classification has the description
-            classification["company_description"] = description
-            
-            return description
-            
+                # Build a fallback description
+                domain = classification.get("domain", "unknown")
+                predicted_class = classification.get("predicted_class", "business")
+
+                # For "Process Did Not Complete" with no data, provide minimal info
+                if predicted_class == "Process Did Not Complete":
+                    if not apollo_data or not isinstance(apollo_data, dict) or not apollo_data.get("name"):
+                        return f"Unable to retrieve information for {domain} due to insufficient data."
+
+                # Get company name
+                company_name = None
+                if apollo_data and isinstance(apollo_data, dict) and apollo_data.get("name"):
+                    company_name = apollo_data.get("name")
+                else:
+                    company_name = domain.split(".")[0].capitalize()
+
+                # Create a basic description
+                description = f"{company_name} is "
+
+                if predicted_class == "Managed Service Provider":
+                    description += "a Managed Service Provider"
+                elif predicted_class == "Integrator - Commercial A/V":
+                    description += "a Commercial A/V Integrator"
+                elif predicted_class == "Integrator - Residential A/V":
+                    description += "a Residential A/V Integrator"
+                else:  # Internal IT
+                    description += "a business"
+
+                # Add industry if available
+                if apollo_data and isinstance(apollo_data, dict) and apollo_data.get("industry"):
+                    description += f" in the {apollo_data.get('industry')} industry"
+
+                description += "."
+
+                # Add employee count if available
+                if apollo_data and isinstance(apollo_data, dict) and apollo_data.get("employee_count"):
+                    description += f" They have approximately {apollo_data.get('employee_count')} employees."
+
+                # Add service descriptions based on class
+                if predicted_class == "Managed Service Provider":
+                    description += " They provide IT services, technology support, and managed solutions to their clients."
+                elif predicted_class == "Integrator - Commercial A/V":
+                    description += " They provide audio-visual systems and integration services for commercial environments."
+                elif predicted_class == "Integrator - Residential A/V":
+                    description += " They provide home automation and entertainment systems for residential clients."
+
+                logger.info(f"Created fallback description for {domain}")
+
+                classification["company_description"] = description
+
+                return description
+
         # Apply the patch
         description_enhancer.generate_detailed_description = improved_generate_description
-        
+
         # Also patch the enhance_company_description function to ensure it works reliably
         original_enhance = description_enhancer.enhance_company_description
-        
+
         def improved_enhance_description(basic_description, apollo_data, classification):
             """Ensure company description is enhanced reliably."""
             # Special handling for "Process Did Not Complete" with no data
@@ -271,38 +259,37 @@ def apply_patches():
                     domain = classification.get("domain", "unknown")
                     logger.info(f"Skipping description enhancement for {domain} - No data available")
                     return f"Unable to retrieve information for {domain} due to insufficient data."
-            
+
             # Try original function
             try:
                 enhanced = original_enhance(basic_description, apollo_data, classification)
-                
                 # Check if description is too short or empty
                 if not enhanced or len(enhanced) < 30:
                     raise ValueError("Enhanced description too short, using fallback")
-                    
                 return enhanced
             except Exception as e:
                 logger.warning(f"Error in original description enhancer: {e}, using fallback")
-            
-            # Fall back to generating a description
-            return improved_generate_description(classification, apollo_data)
-            
+                # Fall back to generating a description
+                return improved_generate_description(classification, apollo_data)
+
         # Apply the patch
         description_enhancer.enhance_company_description = improved_enhance_description
-        
+
         logger.info("✅ Successfully patched description_enhancer functions for reliable descriptions")
-        
     except Exception as e:
         logger.error(f"❌ Failed to patch description_enhancer: {e}")
 
     # 6. Add the fix to prevent description fabrication
     prevent_description_fabrication()
-    
+
     # 7. Add the fix to reclassify parked domains using Apollo data
     reclassify_parked_domains_with_apollo()
-    
+
     # 8. Add the simplified data source separation fix
     separate_data_sources_simple()
+    
+    # 9. Add the description separation fix to properly handle AI and Apollo descriptions
+    fix_description_separation()
 
     logger.info("Complete classification hierarchy fixes successfully applied")
 
@@ -310,19 +297,19 @@ def disable_cross_validation():
     """Disable cross-validation to preserve original LLM classification."""
     try:
         from domain_classifier.utils import cross_validator
-        
+
         # Replace the reconcile_classification function with one that does nothing
         original_reconcile = cross_validator.reconcile_classification
-        
+
         def no_op_reconcile(classification, apollo_data=None, ai_data=None):
             """Do-nothing version of reconcile that preserves the original classification."""
             logger.info(f"Cross-validation disabled - preserving original classification: {classification.get('predicted_class', 'unknown')}")
             return classification  # Return unchanged classification
-        
+
         # Apply the patch
         cross_validator.reconcile_classification = no_op_reconcile
+
         logger.info("✅ Successfully disabled cross-validation to preserve LLM classification")
-        
     except Exception as e:
         logger.error(f"❌ Failed to disable cross-validation: {e}")
 
@@ -330,9 +317,9 @@ def prevent_description_fabrication():
     """Prevent generating fictional descriptions for domains with no data."""
     try:
         from domain_classifier.utils import api_formatter
-        
+
         original_format = api_formatter.format_api_response
-        
+
         def patched_format_api_for_no_data(result):
             # For Process Did Not Complete with no data, ensure description is appropriate
             if result.get("predicted_class") == "Process Did Not Complete":
@@ -344,24 +331,22 @@ def prevent_description_fabrication():
                     # Set a clear "no data" description
                     result["company_description"] = f"Unable to retrieve information for {domain} due to insufficient data."
                     result["company_one_line"] = f"No data available for {domain}."
-                    
                     logger.info(f"Set minimal description for {domain} with no data")
-            
+
             # Call original format function
             formatted = original_format(result)
-            
+
             # Force company description into output
             if "company_description" in result:
-                formatted["03_description"] = result["company_description"]
+                formatted["company_description"] = result["company_description"]
                 logger.info(f"Forced company description into output for {result.get('domain', 'unknown')}")
-            
+
             return formatted
-        
+
         # Apply the patch
         api_formatter.format_api_response = patched_format_api_for_no_data
-        
+
         logger.info("✅ Applied API formatter fix to handle domains with no data")
-        
     except Exception as e:
         logger.error(f"❌ Failed to patch api_formatter for no data handling: {e}")
 
@@ -369,16 +354,15 @@ def reclassify_parked_domains_with_apollo():
     """Modify system to reclassify parked domains using Apollo description when available."""
     try:
         from domain_classifier.utils import final_classification
-        
+
         original_determine = final_classification.determine_final_classification
-        
+
         def enhanced_final_classification(result):
             """Enhanced final classification that uses Apollo data to reclassify parked domains."""
             # Check if this is a parked domain
             if result.get("is_parked", False) or result.get("predicted_class") == "Parked Domain":
                 # Check if Apollo data is available
                 apollo_data = result.get("apollo_data", {})
-                
                 if apollo_data and any(apollo_data.values()):
                     logger.info(f"Parked domain {result.get('domain')} has Apollo data - attempting reclassification")
                     
@@ -438,7 +422,7 @@ def reclassify_parked_domains_with_apollo():
                                 logger.warning(f"Cannot reclassify parked domain {result.get('domain')} - No API key")
                         except Exception as e:
                             logger.error(f"Error reclassifying parked domain with Apollo data: {e}")
-                
+
                 # If reclassification failed or wasn't attempted, use the original logic
                 has_apollo = bool(apollo_data and any(apollo_data.values()))
                 logger.info(f"Domain is parked. Has Apollo data: {has_apollo}")
@@ -447,24 +431,23 @@ def reclassify_parked_domains_with_apollo():
                     return "5-Parked Domain with partial enrichment"
                 else:
                     return "6-Parked Domain - no enrichment"
-            
+
             # For non-parked domains, use the original function
             return original_determine(result)
-        
+
         # Apply the patch
         final_classification.determine_final_classification = enhanced_final_classification
-        
+
         logger.info("✅ Successfully patched final_classification to reclassify parked domains using Apollo data")
-        
     except Exception as e:
         logger.error(f"❌ Failed to patch final_classification for parked domains: {e}")
-    
+
     # Also enhance the description generation for parked domains with Apollo data
     try:
         from domain_classifier.enrichment import description_enhancer
-        
+
         original_generate = description_enhancer.generate_detailed_description
-        
+
         def enhanced_description_for_parked(classification, apollo_data=None, apollo_person_data=None):
             """Generate better descriptions for parked domains with Apollo data."""
             # Check if this is a parked domain with Apollo data
@@ -474,7 +457,6 @@ def reclassify_parked_domains_with_apollo():
                 # If the domain has been reclassified using Apollo data
                 if classification.get("detection_method") == "apollo_description_classification":
                     logger.info(f"Using reclassified description for parked domain {domain}")
-                    
                     # Use the normal description generation, but note that it's based on Apollo data
                     description = original_generate(classification, apollo_data, apollo_person_data)
                     
@@ -494,15 +476,14 @@ def reclassify_parked_domains_with_apollo():
                         description += f" Note: The {domain} website appears to be parked, but company information is available from other sources."
                     
                     return description
-            
+
             # For all other cases, use the original function
             return original_generate(classification, apollo_data, apollo_person_data)
-        
+
         # Apply the patch
         description_enhancer.generate_detailed_description = enhanced_description_for_parked
-        
+
         logger.info("✅ Successfully patched description_enhancer for better parked domain descriptions")
-        
     except Exception as e:
         logger.error(f"❌ Failed to patch description_enhancer for parked domains: {e}")
 
@@ -511,68 +492,207 @@ def separate_data_sources_simple():
     try:
         # Patch the API formatter to handle data sources properly
         from domain_classifier.utils import api_formatter
-        
+
         original_format = api_formatter.format_api_response
-        
+
         def patched_format_api_for_data_separation(result):
             """Format API response with proper data source separation."""
             # Get domain for logging
             domain = result.get("domain", "unknown")
-            
+
             # Get AI-extracted data directly
             ai_data = result.get("ai_company_data", {})
-            
+
             # Get Apollo data
             apollo_data = result.get("apollo_data", {})
-            
+
             # Generate AI-only description from scraped content
             ai_description = None
-            
+
             # If we have AI data, use it to create a description for section 03
             if ai_data and isinstance(ai_data, dict) and any(ai_data.values()):
                 # Use the extracted description from AI data if it exists
-                if ai_data.get("description") and len(ai_data.get("description", "")) > 20:
-                    ai_description = ai_data.get("description")
-                    logger.info(f"Using AI-extracted description for section 03 for {domain}")
-            
+                for field in ["description", "company_description"]:
+                    if ai_data.get(field):
+                        ai_description = ai_data.get(field)
+                        logger.info(f"Using AI-extracted {field} for section 03 for {domain}")
+                        break
+
             # Call original format function to get the base formatted result
             formatted = original_format(result)
-            
+
             # Directly set AI description in section 03 if available
             if ai_description:
                 formatted["03_description"] = ai_description
-            
+
             # Make sure Apollo description stays in section 04
             if apollo_data and isinstance(apollo_data, dict):
                 for key, value in apollo_data.items():
                     if value not in [None, "", 0]:
                         formatted[f"04_{key}"] = value
+
+            # Force company_description to appear in output
+            if "company_description" in result:
+                formatted["company_description"] = result["company_description"]
+                logger.info(f"Forced company description into output for {domain}")
+
+            return formatted
+
+        # Apply the patch
+        api_formatter.format_api_response = patched_format_api_for_data_separation
+
+        logger.info("✅ Successfully applied simplified data source separation")
+
+    except Exception as e:
+        logger.error(f"❌ Failed to apply simplified data source separation: {e}")
+
+def fix_description_separation():
+    """Fix to properly separate AI and Apollo descriptions in the API response."""
+    try:
+        from domain_classifier.utils import api_formatter
+        
+        original_format = api_formatter.format_api_response
+        
+        def patched_format_api_response(result):
+            """Format API response with proper data source separation."""
+            # Get domain for logging
+            domain = result.get("domain", "unknown")
+            
+            # Keep original company description for reference
+            original_company_description = result.get("company_description", "")
+            
+            # Extract AI data with proper error handling
+            ai_data = result.get("ai_company_data", {})
+            if isinstance(ai_data, str):
+                try:
+                    ai_data = json.loads(ai_data)
+                except Exception:
+                    ai_data = {}
+            
+            # Extract Apollo data with proper error handling
+            apollo_data = result.get("apollo_data", {})
+            if isinstance(apollo_data, str):
+                try:
+                    apollo_data = json.loads(apollo_data)
+                except Exception:
+                    apollo_data = {}
+            
+            # Get the base formatted result
+            formatted = original_format(result)
+            
+            # ========== SECTION 3: AI DATA ==========
+            
+            # First, check for AI-extracted data
+            ai_description = None
+            
+            # If we have AI data with a description, use that for section 03
+            if ai_data and isinstance(ai_data, dict):
+                # Try to use any description field in the AI data
+                for field in ["description", "company_description"]:
+                    if ai_data.get(field) and len(ai_data.get(field, "")) > 10:
+                        ai_description = ai_data.get(field)
+                        logger.info(f"Using AI-extracted {field} for section 03 for {domain}")
+                        break
+                
+                # If no description but we have other AI fields, build a simple description
+                if not ai_description and any(ai_data.values()):
+                    parts = []
+                    company_name = ai_data.get("name", domain.split('.')[0].capitalize())
+                    parts.append(f"{company_name} is a company")
+                    
+                    if ai_data.get("industry"):
+                        parts.append(f"in the {ai_data.get('industry')} industry")
+                    
+                    if ai_data.get("employee_count"):
+                        parts.append(f"with approximately {ai_data.get('employee_count')} employees")
+                    
+                    ai_description = " ".join(parts) + "."
+                    logger.info(f"Generated AI description from fields for {domain}")
+            
+            # If no AI description available, create a basic one based on domain and class
+            if not ai_description:
+                # Use domain-derived name and class for a minimal description
+                domain_name = domain.split('.')[0].capitalize()
+                predicted_class = result.get("predicted_class", "")
+                
+                if predicted_class == "Managed Service Provider":
+                    ai_description = f"{domain_name} appears to be a technology service provider that offers IT support and managed services to clients."
+                elif predicted_class == "Integrator - Commercial A/V":
+                    ai_description = f"{domain_name} appears to be a commercial audio-visual integrator providing technology solutions for businesses."
+                elif predicted_class == "Integrator - Residential A/V":
+                    ai_description = f"{domain_name} appears to be a residential audio-visual integrator specializing in home technology solutions."
+                elif predicted_class == "Internal IT Department":
+                    ai_description = f"{domain_name} appears to be a business with internal IT needs rather than a technology service provider."
+                elif predicted_class == "Parked Domain":
+                    ai_description = f"{domain_name} appears to be a parked domain with no active business presence."
+                else:
+                    ai_description = f"{domain_name} is a business whose specific activities could not be determined from the website content."
+                
+                logger.info(f"Created fallback AI description for section 03 for {domain}")
+            
+            # Set the AI description in section 03
+            formatted["03_description"] = ai_description
+            
+            # ========== SECTION 4: APOLLO DATA ==========
+            
+            # Keep Apollo data in section 04
+            apollo_description = None
+            if apollo_data and isinstance(apollo_data, dict):
+                # If Apollo has a short_description, use it
+                if apollo_data.get("short_description") and len(apollo_data.get("short_description", "")) > 10:
+                    apollo_description = apollo_data.get("short_description")
+                    formatted["04_short_description"] = apollo_description
+                    logger.info(f"Set Apollo short_description in section 04 for {domain}")
+            
+            # Make sure all other Apollo fields stay in section 04
+            if apollo_data and isinstance(apollo_data, dict):
+                for key, value in apollo_data.items():
+                    if value not in [None, "", 0]:
+                        formatted[f"04_{key}"] = value
+            
+            # ========== KEEP COMPANY DESCRIPTION ==========
+            
+            # Always ensure the company_description is in the output
+            formatted["company_description"] = original_company_description
+            logger.info(f"Forced company description into output for {domain}")
             
             return formatted
         
         # Apply the patch
-        api_formatter.format_api_response = patched_format_api_for_data_separation
+        api_formatter.format_api_response = patched_format_api_response
         
-        logger.info("✅ Successfully applied simplified data source separation")
-        
-        # Also patch the enrich.py to make sure it keeps AI data separate
+        # Now also patch the enrich.py file to preserve AI data during enrichment
         try:
             from domain_classifier.api.routes import enrich
             
-            # Extract the original function that processes the AI company data
-            original_enrich_data = None
-            for attr_name in dir(enrich):
-                if attr_name.startswith("classify_and_enrich"):
-                    original_enrich_data = getattr(enrich, attr_name)
-                    break
+            # Hook into the classify_and_enrich function to preserve AI data
+            original_extract = enrich.extract_company_data_from_content
             
-            # If we found the function, hook into the AI data extraction
-            if original_enrich_data:
-                logger.info("Successfully hooked into enrich.py for data separation")
-            else:
-                logger.warning("Could not find classify_and_enrich in enrich.py")
+            def patched_extract_company_data(content, domain, classification):
+                """Patched version that ensures AI data is preserved."""
+                # Call original function to get AI data
+                ai_data = original_extract(content, domain, classification)
+                
+                # Store the AI data in the classification result
+                if ai_data and any(ai_data.values()):
+                    # Make sure the AI data is stored in ai_company_data
+                    classification["ai_company_data"] = ai_data
+                    
+                    # If AI data has a description, preserve it separately
+                    if ai_data.get("description"):
+                        # Store the AI description in a separate field that won't be overwritten
+                        classification["ai_description"] = ai_data.get("description")
+                        logger.info(f"Preserved AI-extracted description for {domain}")
+                
+                return ai_data
+            
+            # Apply the patch
+            enrich.extract_company_data_from_content = patched_extract_company_data
+            
+            logger.info("✅ Successfully patched enrich.py to preserve AI descriptions")
         except Exception as enrich_error:
-            logger.error(f"Error hooking into enrich.py: {enrich_error}")
+            logger.error(f"❌ Failed to patch enrich.py: {enrich_error}")
         
+        logger.info("✅ Successfully applied description separation fix")
     except Exception as e:
-        logger.error(f"❌ Failed to apply simplified data source separation: {e}")
+        logger.error(f"❌ Failed to apply description separation fix: {e}")
