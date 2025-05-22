@@ -1,4 +1,4 @@
-"""Modified API formatter to ensure company description and all Apollo fields appear in output."""
+"""API response formatting utilities."""
 
 import logging
 import json
