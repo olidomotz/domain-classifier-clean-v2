@@ -246,65 +246,7 @@ def apply_patches():
     except Exception as e:
         logger.error(f"❌ Failed to patch cross_validator: {e}")
     
-    # 3. Fix result_processor to ensure company description is preserved
-    try:
-        from domain_classifier.storage import result_processor
-        
-        original_process_fresh = result_processor.process_fresh_result
-        
-        def patched_process_fresh(classification, domain, email=None, url=None):
-            # Preserve any existing company_description
-            original_description = classification.get("company_description", "")
-            
-            # Call original function
-            result = original_process_fresh(classification, domain, email, url)
-            
-            # If original description existed but got lost, restore it
-            if original_description and not result.get("company_description"):
-                result["company_description"] = original_description
-                logger.info(f"Restored original company description for {domain}")
-            
-            # Ensure Apollo data is marked correctly
-            if result.get("apollo_data"):
-                result["has_apollo_data"] = True
-            
-            # If classification is from domain pattern or website content, keep it
-            if classification.get("detection_method") in [
-                "domain_pattern_msp", 
-                "llm_classification",
-                "text_parsing", 
-                "vector_similarity"
-            ]:
-                # Make sure classification wasn't changed
-                if classification.get("predicted_class") != result.get("predicted_class"):
-                    logger.warning(f"Restoring original classification for {domain} from {classification.get('detection_method')}")
-                    result["predicted_class"] = classification.get("predicted_class")
-                    result["detection_method"] = classification.get("detection_method")
-            
-            # Make one final check for IT Solutions domains
-            if domain and ("it" in domain.lower() or "tech" in domain.lower()) and "solution" in domain.lower():
-                if result.get("predicted_class") != "Managed Service Provider":
-                    logger.warning(f"Final IT Solutions check: forcing domain {domain} to MSP")
-                    result["predicted_class"] = "Managed Service Provider"
-                    result["detection_method"] = "domain_pattern_msp"
-                    result["confidence_scores"] = {
-                        "Managed Service Provider": 90,
-                        "Integrator - Commercial A/V": 5,
-                        "Integrator - Residential A/V": 5,
-                        "Internal IT Department": 0
-                    }
-                    result["confidence_score"] = 90
-                    result["max_confidence"] = 0.9
-            
-            return result
-        
-        # Apply the patch
-        result_processor.process_fresh_result = patched_process_fresh
-        logger.info("✅ Successfully patched result_processor.process_fresh_result to preserve descriptions")
-    except Exception as e:
-        logger.error(f"❌ Failed to patch result_processor: {e}")
-    
-    # 4. Fix api_formatter to ensure company description is included in the output
+    # 3. Add a check in api_formatter to warn about possible misclassifications
     try:
         from domain_classifier.utils import api_formatter
         
@@ -349,66 +291,23 @@ def apply_patches():
                     if "company_description" in result:
                         result["company_description"] = result["company_description"] + warning
             
-            # Ensure description gets into 03_description
+            # Call original format function
             formatted = original_format(result)
             
             # Force company description into output
-            if "company_description" in result and "03_description" not in formatted:
+            if "company_description" in result:
                 formatted["03_description"] = result["company_description"]
                 logger.info(f"Forced company description into output for {domain}")
-            
-            # Ensure Apollo data fields are included
-            if "apollo_data" in result and "04_aaa_section" in formatted:
-                apollo_data = result["apollo_data"]
-                if isinstance(apollo_data, dict):
-                    # Make sure all Apollo fields are included
-                    for key, value in apollo_data.items():
-                        if value and f"04_{key}" not in formatted:
-                            formatted[f"04_{key}"] = value
-                            logger.info(f"Added Apollo field {key} to output")
             
             return formatted
         
         # Apply the patch
         api_formatter.format_api_response = patched_format_api
-        logger.info("✅ Successfully patched api_formatter.format_api_response to include descriptions and Apollo fields")
+        logger.info("✅ Successfully patched api_formatter.format_api_response to add misclassification warnings")
     except Exception as e:
         logger.error(f"❌ Failed to patch api_formatter: {e}")
     
-    # 5. Fix Apollo connector to include description field
-    try:
-        from domain_classifier.enrichment import apollo_connector
-        
-        # Save original method if we need to call it
-        if hasattr(apollo_connector.ApolloConnector, "_format_company_data"):
-            original_format = apollo_connector.ApolloConnector._format_company_data
-            
-            def patched_format_company_data(self, apollo_data):
-                """Enhanced version that ensures description field is included."""
-                # Call original method to get base formatted data
-                formatted = original_format(self, apollo_data)
-                
-                # Ensure description is included
-                if "description" not in formatted and apollo_data.get("description"):
-                    formatted["description"] = apollo_data.get("description")
-                    logger.info(f"Added description field to Apollo data for {apollo_data.get('name', 'unknown')}")
-                
-                # Add any other missing fields we might need
-                for field in ["short_description", "long_description", "specialties", "keywords", "company_type"]:
-                    if field not in formatted and apollo_data.get(field):
-                        formatted[field] = apollo_data.get(field)
-                
-                return formatted
-            
-            # Apply the patch
-            apollo_connector.ApolloConnector._format_company_data = patched_format_company_data
-            logger.info("✅ Successfully patched Apollo connector to include description field")
-        else:
-            logger.warning("Could not find Apollo connector _format_company_data method to patch")
-    except Exception as e:
-        logger.error(f"❌ Failed to patch Apollo connector: {e}")
-    
-    # 6. Fix final_classification to ensure IT Solutions domains are MSPs
+    # 4. Fix final_classification to ensure IT Solutions domains are MSPs
     try:
         from domain_classifier.utils import final_classification
         
@@ -431,5 +330,113 @@ def apply_patches():
         logger.info("✅ Successfully patched final_classification.determine_final_classification for IT Solutions domains")
     except Exception as e:
         logger.error(f"❌ Failed to patch final_classification: {e}")
+    
+    # 5. Fix description_enhancer to ensure company descriptions are properly generated
+    try:
+        from domain_classifier.enrichment import description_enhancer
+        
+        # Completely replace both description enhancement functions 
+        # rather than patching the Apollo connector which is causing issues
+        def safe_generate_description(classification, apollo_data=None, apollo_person_data=None):
+            """Generate descriptions focused on verified business information."""
+            domain = classification.get("domain", "Unknown")
+            predicted_class = classification.get("predicted_class", "")
+            
+            # Get company name
+            company_name = ""
+            if apollo_data and isinstance(apollo_data, dict) and apollo_data.get("name"):
+                company_name = apollo_data.get("name")
+            else:
+                company_name = classification.get("company_name", domain.split('.')[0].capitalize())
+            
+            # Use Apollo description if available
+            if apollo_data and isinstance(apollo_data, dict) and apollo_data.get("description"):
+                apollo_description = apollo_data.get("description")
+                logger.info(f"Using Apollo description field for {domain}")
+                
+                # Create a description incorporating the Apollo description
+                if predicted_class == "Managed Service Provider":
+                    description = f"{company_name} is a Managed Service Provider. {apollo_description}"
+                elif predicted_class == "Integrator - Commercial A/V":
+                    description = f"{company_name} is a Commercial A/V Integrator. {apollo_description}"
+                elif predicted_class == "Integrator - Residential A/V":
+                    description = f"{company_name} is a Residential A/V Integrator. {apollo_description}"
+                else:  # Internal IT
+                    description = f"{company_name} is a business. {apollo_description}"
+                
+                return description
+            
+            # Build description with focus on verified information if no Apollo description
+            # Start with standard opening
+            if predicted_class == "Managed Service Provider":
+                description = f"{company_name} is a Managed Service Provider"
+            elif predicted_class == "Integrator - Commercial A/V":
+                description = f"{company_name} is a Commercial A/V Integrator"
+            elif predicted_class == "Integrator - Residential A/V":
+                description = f"{company_name} is a Residential A/V Integrator"
+            else:  # Internal IT
+                description = f"{company_name} is a business"
+            
+            # Add location if available
+            location_parts = []
+            if apollo_data and isinstance(apollo_data, dict) and "address" in apollo_data:
+                address = apollo_data.get("address", {})
+                if isinstance(address, dict):
+                    if address.get("city"):
+                        location_parts.append(address.get("city"))
+                    if address.get("state"):
+                        location_parts.append(address.get("state"))
+                    if address.get("country") and address.get("country") not in ["United States", "US", "USA"]:
+                        location_parts.append(address.get("country"))
+            
+            location = ", ".join(location_parts) if location_parts else ""
+            if location:
+                description += f" based in {location}"
+            
+            # Add industry if available
+            if apollo_data and isinstance(apollo_data, dict) and apollo_data.get("industry"):
+                description += f". The company operates in the {apollo_data.get('industry')} sector"
+            
+            description += "."
+            
+            # Add founded info if available
+            if apollo_data and isinstance(apollo_data, dict) and apollo_data.get("founded_year"):
+                description += f" Founded in {apollo_data.get('founded_year')}."
+            
+            # Add employee count if available
+            if apollo_data and isinstance(apollo_data, dict) and apollo_data.get("employee_count"):
+                description += f" The company has approximately {apollo_data.get('employee_count')} employees."
+            
+            # Add standard type-specific descriptions
+            if predicted_class == "Managed Service Provider":
+                description += " They provide IT services, technology support, and solutions to their clients."
+            elif predicted_class == "Integrator - Commercial A/V":
+                description += " They provide audio-visual systems and solutions for business environments."
+            elif predicted_class == "Integrator - Residential A/V":
+                description += " They provide home automation and entertainment systems for residential clients."
+            else:  # Internal IT
+                if apollo_data and isinstance(apollo_data, dict) and apollo_data.get("industry"):
+                    description += f" As a {apollo_data.get('industry')} company, they have internal IT needs rather than providing technology services to others."
+                else:
+                    description += " The company has internal IT needs rather than providing technology services to others."
+            
+            # Add LinkedIn if available
+            if apollo_data and isinstance(apollo_data, dict) and apollo_data.get("linkedin_url"):
+                description += f" LinkedIn: {apollo_data.get('linkedin_url')}"
+            
+            logger.info(f"Generated verified business-focused description for {domain}")
+            return description
+        
+        # Define a simple wrapper for the other function
+        def safe_enhance_company_description(basic_description, apollo_data, classification):
+            return safe_generate_description(classification, apollo_data)
+        
+        # Replace the functions
+        description_enhancer.generate_detailed_description = safe_generate_description
+        description_enhancer.enhance_company_description = safe_enhance_company_description
+        
+        logger.info("✅ Successfully replaced description_enhancer functions with business-focused versions")
+    except Exception as e:
+        logger.error(f"❌ Failed to patch description_enhancer: {e}")
     
     logger.info("Complete classification hierarchy fixes successfully applied")
