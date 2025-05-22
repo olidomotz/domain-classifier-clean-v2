@@ -87,8 +87,17 @@ def apply_patches():
         original_format = api_formatter.format_api_response
 
         def patched_format_api(result):
+            # CRITICAL: Check for DNS errors first
+            if result.get("error_type") == "dns_error" or (result.get("is_dns_error") == True):
+                result["final_classification"] = "7-No Website available"
+                result["predicted_class"] = "DNS Error"
+                domain = result.get("domain", "unknown")
+                company_name = result.get("company_name", domain.split('.')[0].capitalize())
+                result["company_description"] = f"The domain {domain} could not be resolved. It may not exist or its DNS records may be misconfigured."
+                result["company_one_line"] = f"Domain cannot be reached - DNS error."
+            
             # Make sure company_description exists
-            if not result.get("company_description"):
+            elif not result.get("company_description"):
                 domain = result.get("domain", "")
                 predicted_class = result.get("predicted_class", "Unknown")
                 company_name = result.get("company_name", domain.split('.')[0].capitalize())
@@ -131,6 +140,13 @@ def apply_patches():
             if "company_description" in result:
                 formatted["company_description"] = result["company_description"]
                 logger.info(f"Forced company description into output for {domain}")
+                
+            # CRITICAL: For DNS errors, force the final classification in the formatted result
+            if result.get("error_type") == "dns_error" or (result.get("is_dns_error") == True):
+                formatted["02_final_classification"] = "7-No Website available"
+                if "02_classification" in formatted:
+                    formatted["02_classification"] = "DNS Error"
+                formatted["03_description"] = f"The domain {domain} could not be resolved. It may not exist or its DNS records may be misconfigured."
 
             return formatted
 
@@ -141,7 +157,7 @@ def apply_patches():
     except Exception as e:
         logger.error(f"❌ Failed to patch api_formatter: {e}")
 
-    # 4. Fix final_classification to ensure IT Solutions domains are MSPs
+    # 4. Fix final_classification to ensure IT Solutions domains are MSPs and DNS errors are properly handled
     try:
         from domain_classifier.utils import final_classification
 
@@ -151,7 +167,9 @@ def apply_patches():
             domain = result.get("domain", "")
             
             # CRITICAL: First check for DNS errors
-            if result.get("error_type") == "dns_error" or (isinstance(result.get("explanation", ""), str) and "DNS" in result.get("explanation", "")):
+            if (result.get("error_type") == "dns_error" or 
+                result.get("is_dns_error") == True or 
+                (isinstance(result.get("explanation", ""), str) and "DNS" in result.get("explanation", ""))):
                 logger.info(f"DNS error detected for {domain}, classifying as No Website available")
                 return "7-No Website available"
 
@@ -186,12 +204,13 @@ def apply_patches():
         def improved_generate_description(classification, apollo_data=None, apollo_person_data=None):
             """Generate a reliable company description."""
             # HANDLE DNS ERROR CASES
-            if classification.get("error_type") == "dns_error":
+            if classification.get("error_type") == "dns_error" or classification.get("is_dns_error") == True:
                 domain = classification.get("domain", "unknown")
                 logger.info(f"Generating description for DNS error domain: {domain}")
                 classification["company_description"] = f"The domain {domain} could not be resolved. It may not exist or its DNS records may be misconfigured."
                 classification["company_one_line"] = f"Domain cannot be reached - DNS error."
                 classification["final_classification"] = "7-No Website available"
+                classification["predicted_class"] = "DNS Error"
                 return classification["company_description"]
                 
             # Check if this is a "Process Did Not Complete" classification with no data
@@ -281,10 +300,11 @@ def apply_patches():
         def improved_enhance_description(basic_description, apollo_data, classification):
             """Ensure company description is enhanced reliably."""
             # HANDLE DNS ERROR CASES
-            if classification.get("error_type") == "dns_error":
+            if classification.get("error_type") == "dns_error" or classification.get("is_dns_error") == True:
                 domain = classification.get("domain", "unknown")
                 logger.info(f"DNS error detected in enhance_company_description for {domain}")
                 classification["final_classification"] = "7-No Website available"
+                classification["predicted_class"] = "DNS Error"
                 return f"The domain {domain} could not be resolved. It may not exist or its DNS records may be misconfigured."
                 
             # Special handling for "Process Did Not Complete" with no data
@@ -315,30 +335,148 @@ def apply_patches():
     except Exception as e:
         logger.error(f"❌ Failed to patch description_enhancer: {e}")
 
-    # 6. Add the fix to prevent description fabrication
+    # 6. Direct patch for error handling module to ensure DNS errors are correctly classified
+    try:
+        from domain_classifier.utils import error_handling
+        
+        original_create_error = error_handling.create_error_result
+        
+        def patched_create_error_result(domain, error_type=None, error_detail=None, email=None, crawler_type=None):
+            """Patched version that ensures DNS errors get the right classification and predicted class."""
+            # Call original function to get the base result
+            error_result = original_create_error(domain, error_type, error_detail, email, crawler_type)
+            
+            # Ensure DNS errors get the correct classification
+            if error_type == "dns_error":
+                error_result["final_classification"] = "7-No Website available"
+                error_result["predicted_class"] = "DNS Error"  # Not just Unknown
+                error_result["company_description"] = f"The domain {domain} could not be resolved. It may not exist or its DNS records may be misconfigured."
+                error_result["company_one_line"] = f"Domain cannot be reached - DNS error."
+                logger.info(f"Set DNS error classification for {domain}")
+            
+            return error_result
+        
+        # Apply the patch
+        error_handling.create_error_result = patched_create_error_result
+        
+        logger.info("✅ Successfully patched error_handling to properly classify DNS errors")
+    except Exception as e:
+        logger.error(f"❌ Failed to patch error_handling for DNS errors: {e}")
+
+    # 7. Patch the classify_and_enrich route to ensure DNS errors are properly handled
+    try:
+        # Path to the module file
+        module_path = "domain_classifier/api/routes/enrich.py"
+        
+        # Load the module
+        spec = importlib.util.spec_from_file_location("enrich", module_path)
+        if spec:
+            enrich_module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(enrich_module)
+            
+            # Find the function that does the classification and enrichment
+            if hasattr(enrich_module, "classify_and_enrich"):
+                original_classify_and_enrich = enrich_module.classify_and_enrich
+                
+                # Create a wrapper around the original function
+                def patched_classify_and_enrich(*args, **kwargs):
+                    """
+                    Patched version that properly handles DNS errors.
+                    """
+                    # Check if there's a 'url' parameter in the request
+                    import json
+                    from flask import request
+                    data = request.json
+                    domain = None
+                    if data and "url" in data:
+                        input_value = data["url"].strip()
+                        if not '@' in input_value:  # Not an email
+                            # Parse domain
+                            from urllib.parse import urlparse
+                            if not input_value.startswith('http'):
+                                input_value = 'https://' + input_value
+                            parsed_url = urlparse(input_value)
+                            domain = parsed_url.netloc
+                            if domain.startswith('www.'):
+                                domain = domain[4:]
+                    
+                    # Call the original function to get the result
+                    result = original_classify_and_enrich(*args, **kwargs)
+                    
+                    # Check if it's a jsonify result by looking at its data attribute
+                    if domain and hasattr(result, 'data'):
+                        try:
+                            # Check if DNS resolution failed for this domain
+                            import socket
+                            try:
+                                socket.gethostbyname(domain)
+                                # DNS resolution succeeded
+                            except socket.gaierror:
+                                # DNS resolution failed - fix the response
+                                try:
+                                    # Parse the JSON data
+                                    data = json.loads(result.data)
+                                    
+                                    # Modify the data for DNS errors
+                                    data["02_final_classification"] = "7-No Website available"
+                                    if "02_classification" in data:
+                                        data["02_classification"] = "DNS Error"
+                                    data["03_description"] = f"The domain {domain} could not be resolved. It may not exist or its DNS records may be misconfigured."
+                                    data["company_description"] = f"The domain {domain} could not be resolved. It may not exist or its DNS records may be misconfigured."
+                                    
+                                    # Replace the result data
+                                    from flask import jsonify
+                                    new_result = jsonify(data)
+                                    result.data = new_result.data
+                                    
+                                    logger.info(f"Fixed DNS error classification in response for {domain}")
+                                except Exception as e:
+                                    logger.error(f"Error modifying response for DNS error: {e}")
+                        except Exception as socket_error:
+                            logger.error(f"Error checking DNS for {domain}: {socket_error}")
+                    
+                    return result
+                
+                # Apply the patch
+                enrich_module.classify_and_enrich = patched_classify_and_enrich
+                
+                # Re-register in sys.modules
+                sys.modules["domain_classifier.api.routes.enrich"] = enrich_module
+                
+                # Try to patch via import as well
+                try:
+                    from domain_classifier.api.routes import enrich
+                    enrich.classify_and_enrich = patched_classify_and_enrich
+                    logger.info("Applied classify_and_enrich patch via import")
+                except Exception as e:
+                    logger.error(f"Failed to apply classify_and_enrich patch via import: {e}")
+                
+                logger.info("✅ Successfully patched classify_and_enrich to handle DNS errors")
+            else:
+                logger.warning("Could not find classify_and_enrich function to patch")
+        else:
+            logger.warning("Could not create spec for enrich module")
+    except Exception as e:
+        logger.error(f"❌ Failed to patch classify_and_enrich for DNS errors: {e}")
+
+    # 8. Add the fix to prevent description fabrication
     prevent_description_fabrication()
 
-    # 7. Add the fix to reclassify parked domains using Apollo data
+    # 9. Add the fix to reclassify parked domains using Apollo data
     reclassify_parked_domains_with_apollo()
 
-    # 8. Add the simplified data source separation fix
+    # 10. Add the simplified data source separation fix
     separate_data_sources_simple()
     
-    # 9. Add the improved description separation fix to properly handle AI and Apollo descriptions
+    # 11. Add the improved description separation fix to properly handle AI and Apollo descriptions
     fix_description_separation()
     
-    # 10. Apply DIRECT fix for Process Did Not Complete classification
+    # 12. Apply DIRECT fix for Process Did Not Complete classification
     fix_process_did_not_complete_classification()
     
-    # 11. Fix the classify routes to handle empty content properly
-    fix_classify_routes_for_empty_content()
-    
-    # 12. Ensure all text in merged data is in English
+    # 13. Ensure all text in merged data is in English
     ensure_english_data()
     
-    # 13. Fix DNS error classification to use 7-No Website available
-    fix_dns_error_classification()
-
     logger.info("Complete classification hierarchy fixes successfully applied")
 
 def disable_cross_validation():
@@ -369,8 +507,16 @@ def prevent_description_fabrication():
         original_format = api_formatter.format_api_response
 
         def patched_format_api_for_no_data(result):
+            # For DNS errors, force the correct classification
+            if result.get("error_type") == "dns_error" or result.get("is_dns_error") == True:
+                domain = result.get("domain", "")
+                result["final_classification"] = "7-No Website available"
+                result["predicted_class"] = "DNS Error"
+                result["company_description"] = f"The domain {domain} could not be resolved. It may not exist or its DNS records may be misconfigured."
+                result["company_one_line"] = f"Domain cannot be reached - DNS error."
+            
             # For Process Did Not Complete with no data, ensure description is appropriate
-            if result.get("predicted_class") == "Process Did Not Complete":
+            elif result.get("predicted_class") == "Process Did Not Complete":
                 domain = result.get("domain", "")
                 
                 # CRITICAL NEW ADDITION: Force final_classification to be "8-Unknown/No Data"
@@ -383,11 +529,6 @@ def prevent_description_fabrication():
                     result["company_description"] = f"Unable to retrieve information for {domain} due to insufficient data."
                     result["company_one_line"] = f"No data available for {domain}."
                     logger.info(f"Set minimal description for {domain} with no data")
-            
-            # For DNS errors, ensure the right classification
-            if result.get("error_type") == "dns_error":
-                result["final_classification"] = "7-No Website available"
-                result["company_description"] = f"The domain {result.get('domain', 'unknown')} could not be resolved. It may not exist or its DNS records may be misconfigured."
 
             # Call original format function
             formatted = original_format(result)
@@ -397,15 +538,14 @@ def prevent_description_fabrication():
                 formatted["company_description"] = result["company_description"]
                 logger.info(f"Forced company description into output for {result.get('domain', 'unknown')}")
                 
-            # CRITICAL NEW ADDITION: Force final_classification in formatted result
+            # CRITICAL: Force final_classification in formatted result based on condition
             if result.get("predicted_class") == "Process Did Not Complete":
                 formatted["02_final_classification"] = "8-Unknown/No Data"
-            
-            # Force DNS error classification
-            if result.get("error_type") == "dns_error":
-                formatted["02_final_classification"] = "7-No Website available"
                 
-                # Also ensure a clear error description
+            if result.get("error_type") == "dns_error" or result.get("is_dns_error") == True:
+                formatted["02_final_classification"] = "7-No Website available"
+                if "02_classification" in formatted:
+                    formatted["02_classification"] = "DNS Error"
                 formatted["03_description"] = f"The domain {result.get('domain', 'unknown')} could not be resolved. It may not exist or its DNS records may be misconfigured."
 
             return formatted
@@ -427,7 +567,7 @@ def reclassify_parked_domains_with_apollo():
         def enhanced_final_classification(result):
             """Enhanced final classification that uses Apollo data to reclassify parked domains."""
             # CRITICAL ADDITION: Check first for DNS errors
-            if result.get("error_type") == "dns_error" or (isinstance(result.get("explanation", ""), str) and "DNS" in result.get("explanation", "")):
+            if result.get("error_type") == "dns_error" or result.get("is_dns_error") == True or (isinstance(result.get("explanation", ""), str) and "DNS" in result.get("explanation", "")):
                 logger.info(f"DNS error detected for {result.get('domain', 'unknown')}, classifying as No Website available")
                 return "7-No Website available"
                 
@@ -528,11 +668,12 @@ def reclassify_parked_domains_with_apollo():
         def enhanced_description_for_parked(classification, apollo_data=None, apollo_person_data=None):
             """Generate better descriptions for parked domains with Apollo data."""
             # Handle DNS error cases
-            if classification.get("error_type") == "dns_error":
+            if classification.get("error_type") == "dns_error" or classification.get("is_dns_error") == True:
                 domain = classification.get("domain", "unknown")
                 logger.info(f"DNS error detected in enhanced_description_for_parked for {domain}")
                 # Set proper final classification
                 classification["final_classification"] = "7-No Website available"
+                classification["predicted_class"] = "DNS Error"
                 return f"The domain {domain} could not be resolved. It may not exist or its DNS records may be misconfigured."
                 
             # Check if this is a parked domain with Apollo data
@@ -584,6 +725,13 @@ def separate_data_sources_simple():
             """Format API response with proper data source separation."""
             # Get domain for logging
             domain = result.get("domain", "unknown")
+            
+            # CRITICAL: Check for DNS errors first
+            if result.get("error_type") == "dns_error" or result.get("is_dns_error") == True:
+                result["final_classification"] = "7-No Website available"
+                result["predicted_class"] = "DNS Error"
+                result["company_description"] = f"The domain {domain} could not be resolved. It may not exist or its DNS records may be misconfigured."
+                result["company_one_line"] = f"Domain cannot be reached - DNS error."
 
             # Get AI-extracted data directly
             ai_data = result.get("ai_company_data", {})
@@ -593,9 +741,12 @@ def separate_data_sources_simple():
 
             # Generate AI-only description from scraped content
             ai_description = None
-
+            
+            # For DNS errors, set a specific description
+            if result.get("error_type") == "dns_error" or result.get("is_dns_error") == True:
+                ai_description = f"The domain {domain} could not be resolved. It may not exist or its DNS records may be misconfigured."
             # If we have AI data, use it to create a description for section 03
-            if ai_data and isinstance(ai_data, dict) and any(ai_data.values()):
+            elif ai_data and isinstance(ai_data, dict) and any(ai_data.values()):
                 # Use the extracted description from AI data if it exists
                 for field in ["description", "company_description"]:
                     if ai_data.get(field):
@@ -626,7 +777,7 @@ def separate_data_sources_simple():
                 formatted["02_final_classification"] = "8-Unknown/No Data"
                 
             # Force DNS error classification
-            if result.get("error_type") == "dns_error":
+            if result.get("error_type") == "dns_error" or result.get("is_dns_error") == True:
                 formatted["02_final_classification"] = "7-No Website available"
                 
                 # Also update the classification
@@ -662,12 +813,15 @@ def fix_description_separation():
             predicted_class = result.get("predicted_class", "")
             company_name = result.get("company_name", domain.split('.')[0].capitalize())
             
-            # CRITICAL: Handle DNS errors
-            if result.get("error_type") == "dns_error":
+            # CRITICAL: Handle DNS errors first
+            if result.get("error_type") == "dns_error" or result.get("is_dns_error") == True:
                 result["final_classification"] = "7-No Website available"
+                result["predicted_class"] = "DNS Error"
+                result["company_description"] = f"The domain {domain} could not be resolved. It may not exist or its DNS records may be misconfigured."
+                result["company_one_line"] = f"Domain cannot be reached - DNS error."
                 
             # Handle Process Did Not Complete cases
-            if predicted_class == "Process Did Not Complete":
+            elif predicted_class == "Process Did Not Complete":
                 result["final_classification"] = "8-Unknown/No Data"
             
             # Keep original company description for reference
@@ -698,7 +852,7 @@ def fix_description_separation():
             ai_description = None
             
             # Handle DNS errors specially
-            if result.get("error_type") == "dns_error":
+            if result.get("error_type") == "dns_error" or result.get("is_dns_error") == True:
                 ai_description = f"The domain {domain} could not be resolved. It may not exist or its DNS records may be misconfigured."
                 logger.info(f"Generated DNS error description for {domain}")
                 
@@ -795,13 +949,17 @@ def fix_description_separation():
             # ========== KEEP COMPANY DESCRIPTION ==========
             
             # Always ensure the company_description is in the output
-            formatted["company_description"] = original_company_description
+            if result.get("error_type") == "dns_error" or result.get("is_dns_error") == True:
+                formatted["company_description"] = f"The domain {domain} could not be resolved. It may not exist or its DNS records may be misconfigured."
+            else:
+                formatted["company_description"] = original_company_description
+            
             logger.info(f"Forced company description into output for {domain}")
             
             # CRITICAL: Force final_classification based on result type
             if predicted_class == "Process Did Not Complete":
                 formatted["02_final_classification"] = "8-Unknown/No Data"
-            elif result.get("error_type") == "dns_error":
+            elif result.get("error_type") == "dns_error" or result.get("is_dns_error") == True:
                 formatted["02_final_classification"] = "7-No Website available"
                 # Also set the classification
                 if "02_classification" in formatted:
@@ -822,7 +980,7 @@ def fix_description_separation():
             def patched_extract_company_data(content, domain, classification):
                 """Patched version that ensures AI data has better descriptions."""
                 # Handle DNS errors specially
-                if classification.get("error_type") == "dns_error":
+                if classification.get("error_type") == "dns_error" or classification.get("is_dns_error") == True:
                     # Create a minimal AI data object with just the DNS error description
                     ai_data = {
                         "name": domain.split('.')[0].capitalize(),
@@ -830,6 +988,7 @@ def fix_description_separation():
                     }
                     classification["ai_company_data"] = ai_data
                     classification["final_classification"] = "7-No Website available"
+                    classification["predicted_class"] = "DNS Error"
                     return ai_data
                     
                 # Call original function to get AI data
@@ -929,7 +1088,7 @@ def fix_process_did_not_complete_classification():
                 domain = result.get("domain", "unknown")
                 
                 # Handle DNS errors first
-                if result.get("error_type") == "dns_error" or (isinstance(result.get("explanation", ""), str) and "DNS" in result.get("explanation", "")):
+                if result.get("error_type") == "dns_error" or result.get("is_dns_error") == True or (isinstance(result.get("explanation", ""), str) and "DNS" in result.get("explanation", "")):
                     logger.info(f"DNS error detected for {domain}, classifying as No Website available")
                     return "7-No Website available"
                 
@@ -956,198 +1115,11 @@ def fix_process_did_not_complete_classification():
                 logger.error(f"Failed to apply standard patch: {e}")
             
             logger.info("✅ Successfully applied direct fix for Process Did Not Complete classification")
-            
-            # Now patch the API formatter to display the new classification properly
-            try:
-                from domain_classifier.utils import api_formatter
-                
-                original_format = api_formatter.format_api_response
-                
-                def patched_formatter_with_unknown(result):
-                    """Update API formatter to handle Unknown/No Data classification."""
-                    # Get the formatted result from the current formatter
-                    formatted = original_format(result)
-                    
-                    # Check if this is a "Process Did Not Complete" with no data
-                    if result.get("predicted_class") == "Process Did Not Complete":
-                        # Update the final classification display
-                        if result.get("final_classification") == "8-Unknown/No Data":
-                            formatted["02_final_classification"] = "8-Unknown/No Data"
-                            
-                            # Also ensure we have a clear description
-                            domain = result.get("domain", "unknown")
-                            formatted["03_description"] = f"Unable to retrieve information for {domain} due to insufficient data."
-                            formatted["company_description"] = f"Unable to retrieve information for {domain} due to insufficient data."
-                        else:
-                            # Force it even if it wasn't set earlier
-                            formatted["02_final_classification"] = "8-Unknown/No Data"
-                            result["final_classification"] = "8-Unknown/No Data"
-                    
-                    return formatted
-                    
-                # Apply the patch
-                api_formatter.format_api_response = patched_formatter_with_unknown
-                
-                logger.info("✅ Successfully patched api_formatter to handle Unknown/No Data classification")
-            except Exception as e:
-                logger.error(f"❌ Failed to patch api_formatter for Unknown/No Data classification: {e}")
         else:
             logger.error("Could not create spec for final_classification module")
         
     except Exception as e:
         logger.error(f"❌ Failed to apply Process Did Not Complete classification fix: {e}")
-
-def fix_classify_routes_for_empty_content():
-    """
-    Fix the classify routes to properly handle cases where a domain returns a 200 status
-    but has no actual content. This ensures proper "Process Did Not Complete" classification.
-    """
-    logger.info("Applying fix for classify routes to handle empty content...")
-    
-    try:
-        # Try to patch the classify_domain function in routes/classify.py
-        import importlib.util
-        import sys
-        
-        # Path to the module file
-        module_path = "domain_classifier/api/routes/classify.py"
-        
-        # Load the module
-        spec = importlib.util.spec_from_file_location("classify", module_path)
-        if spec:
-            classify_module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(classify_module)
-            
-            # Find the function that does the final classification
-            if hasattr(classify_module, "classify_domain"):
-                original_classify_domain = classify_module.classify_domain
-                
-                # Create a wrapper around the original function
-                def patched_classify_domain(*args, **kwargs):
-                    """
-                    Patched version that ensures empty content gets properly classified.
-                    """
-                    # Call the original function
-                    result, status_code = original_classify_domain(*args, **kwargs)
-                    
-                    # Check if this is a Process Did Not Complete result
-                    if isinstance(result, dict) and result.get("predicted_class") == "Process Did Not Complete":
-                        # Force final_classification to be 8-Unknown/No Data
-                        result["final_classification"] = "8-Unknown/No Data"
-                        logger.info(f"Set final_classification to 8-Unknown/No Data for {result.get('domain', 'unknown')}")
-                    
-                    # Check for DNS errors
-                    if isinstance(result, dict) and result.get("error_type") == "dns_error":
-                        # Force final_classification to be 7-No Website available
-                        result["final_classification"] = "7-No Website available"
-                        logger.info(f"Set final_classification to 7-No Website available for {result.get('domain', 'unknown')}")
-                    
-                    return result, status_code
-                
-                # Apply the patch
-                classify_module.classify_domain = patched_classify_domain
-                
-                # Re-register in sys.modules
-                sys.modules["domain_classifier.api.routes.classify"] = classify_module
-                
-                # Try to patch via import as well
-                try:
-                    from domain_classifier.api.routes import classify
-                    classify.classify_domain = patched_classify_domain
-                    logger.info("Applied classify_domain patch via import")
-                except Exception as e:
-                    logger.error(f"Failed to apply classify_domain patch via import: {e}")
-                
-                logger.info("✅ Successfully patched classify_domain to handle empty content")
-            else:
-                logger.warning("Could not find classify_domain function to patch")
-            
-            # Also patch the classify_and_enrich function in routes/enrich.py
-            try:
-                # Path to the module file
-                module_path = "domain_classifier/api/routes/enrich.py"
-                
-                # Load the module
-                spec = importlib.util.spec_from_file_location("enrich", module_path)
-                if spec:
-                    enrich_module = importlib.util.module_from_spec(spec)
-                    spec.loader.exec_module(enrich_module)
-                    
-                    # Find the function that does the classification and enrichment
-                    if hasattr(enrich_module, "classify_and_enrich"):
-                        original_classify_and_enrich = enrich_module.classify_and_enrich
-                        
-                        # Create a wrapper around the original function
-                        def patched_classify_and_enrich(*args, **kwargs):
-                            """
-                            Patched version that ensures Process Did Not Complete gets proper classification.
-                            """
-                            # Call the original function to get the result
-                            result = original_classify_and_enrich(*args, **kwargs)
-                            
-                            # Check if it's a jsonify result by looking at its data attribute
-                            if hasattr(result, 'data'):
-                                import json
-                                try:
-                                    # Parse the JSON data
-                                    data = json.loads(result.data)
-                                    
-                                    # Check for Process Did Not Complete
-                                    if data.get("02_classification") == "Process Did Not Complete":
-                                        # Modify the data to set the final classification
-                                        data["02_final_classification"] = "8-Unknown/No Data"
-                                        
-                                        # Replace the result data
-                                        from flask import jsonify
-                                        new_result = jsonify(data)
-                                        result.data = new_result.data
-                                        
-                                        logger.info(f"Fixed final classification in classify_and_enrich response")
-                                    
-                                    # Check for DNS errors
-                                    if data.get("error_type") == "dns_error":
-                                        # Modify the data to set the final classification
-                                        data["02_final_classification"] = "7-No Website available"
-                                        if "02_classification" in data:
-                                            data["02_classification"] = "DNS Error"
-                                        
-                                        # Replace the result data
-                                        from flask import jsonify
-                                        new_result = jsonify(data)
-                                        result.data = new_result.data
-                                        
-                                        logger.info(f"Fixed DNS error classification in classify_and_enrich response")
-                                except Exception as e:
-                                    logger.error(f"Error modifying classify_and_enrich response: {e}")
-                            
-                            return result
-                        
-                        # Apply the patch
-                        enrich_module.classify_and_enrich = patched_classify_and_enrich
-                        
-                        # Re-register in sys.modules
-                        sys.modules["domain_classifier.api.routes.enrich"] = enrich_module
-                        
-                        # Try to patch via import as well
-                        try:
-                            from domain_classifier.api.routes import enrich
-                            enrich.classify_and_enrich = patched_classify_and_enrich
-                            logger.info("Applied classify_and_enrich patch via import")
-                        except Exception as e:
-                            logger.error(f"Failed to apply classify_and_enrich patch via import: {e}")
-                        
-                        logger.info("✅ Successfully patched classify_and_enrich to handle Process Did Not Complete")
-                    else:
-                        logger.warning("Could not find classify_and_enrich function to patch")
-                else:
-                    logger.error("Could not create spec for enrich module")
-            except Exception as e:
-                logger.error(f"❌ Failed to patch classify_and_enrich: {e}")
-        else:
-            logger.error("Could not create spec for classify module")
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to apply fix for classify routes: {e}")
 
 def ensure_english_data():
     """
@@ -1316,6 +1288,18 @@ def ensure_english_data():
             
             def patched_extract_with_translation(content, domain, classification):
                 """Ensure AI-extracted data is translated to English if needed."""
+                # Handle DNS errors specially
+                if classification.get("error_type") == "dns_error" or classification.get("is_dns_error") == True:
+                    # Create a minimal AI data object with just the DNS error description
+                    ai_data = {
+                        "name": domain.split('.')[0].capitalize(),
+                        "description": f"The domain {domain} could not be resolved. It may not exist or its DNS records may be misconfigured."
+                    }
+                    classification["ai_company_data"] = ai_data
+                    classification["final_classification"] = "7-No Website available"
+                    classification["predicted_class"] = "DNS Error"
+                    return ai_data
+                
                 # Call original function
                 ai_data = original_extract(content, domain, classification)
                 
@@ -1341,68 +1325,3 @@ def ensure_english_data():
         logger.info("✅ Successfully applied English translation fix for merged data")
     except Exception as e:
         logger.error(f"❌ Failed to apply English translation fix: {e}")
-
-def patched_determine_with_dns_error(result):
-            """Enhanced final classification that properly handles DNS errors."""
-            domain = result.get("domain", "")
-            
-            # First check if this is a DNS error case
-            if result.get("error_type") == "dns_error" or (isinstance(result.get("explanation", ""), str) and "DNS" in result.get("explanation", "")):
-                logger.info(f"DNS error detected for {domain}, classifying as No Website available")
-                return "7-No Website available"
-            
-            # Then handle Process Did Not Complete
-            if result.get("predicted_class") == "Process Did Not Complete":
-                logger.info(f"Process Did Not Complete detected for {domain}, using special classification")
-                return "8-Unknown/No Data"
-                
-            # Then check for IT Solutions domains
-            if domain and ("it" in domain.lower() or "tech" in domain.lower()) and "solution" in domain.lower():
-                logger.info(f"Final classification override: IT Solutions domain {domain} to MSP")
-                # Force MSP classification code
-                return "1-MSP"
-            
-            # For all other cases, use the original function
-            return original_determine(result)
-        
-        # Apply the patch
-        final_classification.determine_final_classification = patched_determine_with_dns_error
-        
-        logger.info("✅ Successfully patched final_classification for DNS error handling")
-        
-        # Also patch the API formatter to handle DNS errors properly
-        from domain_classifier.utils import api_formatter
-        
-        original_format = api_formatter.format_api_response
-        
-        def patched_format_with_dns_errors(result):
-            """Format API response with proper DNS error handling."""
-            # Check if this is a DNS error result
-            if result.get("error_type") == "dns_error":
-                # Force the final classification to be 7-No Website available
-                result["final_classification"] = "7-No Website available"
-                
-                # Force the predicted class to be "DNS Error"
-                result["predicted_class"] = "DNS Error"
-            
-            # Get the formatted result from the existing formatter
-            formatted = original_format(result)
-            
-            # Force correct formatting for DNS errors
-            if result.get("error_type") == "dns_error":
-                formatted["02_final_classification"] = "7-No Website available"
-                if "02_classification" in formatted:
-                    formatted["02_classification"] = "DNS Error"
-                
-                # Make sure we have the right description
-                formatted["03_description"] = f"The domain {result.get('domain', 'unknown')} could not be resolved. It may not exist or its DNS records may be misconfigured."
-            
-            return formatted
-        
-        # Apply the patch
-        api_formatter.format_api_response = patched_format_with_dns_errors
-        
-        logger.info("✅ Successfully patched api_formatter for DNS error handling")
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to apply DNS error classification fix: {e}")
