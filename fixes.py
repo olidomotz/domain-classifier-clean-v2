@@ -4,7 +4,7 @@ Domain Classifier Fixes - Complete Classification Hierarchy Fix
 This script fixes all classification inconsistencies by implementing a clear priority:
 1. Domain name evidence (highest)
 2. Website content evidence (second)
-3. Apollo company description field only (lowest)
+3. Apollo company description field (lowest)
 """
 
 import logging
@@ -153,8 +153,8 @@ def apply_patches():
                 # Keep original classification
                 return classification
             
-            # =========== LEVEL 3: APOLLO COMPANY DESCRIPTION ONLY (LOWEST PRIORITY) ===========
-            # Only use Apollo company description if we have no stronger signals
+            # =========== LEVEL 3: APOLLO COMPANY DESCRIPTION FIELD (LOWEST PRIORITY) ===========
+            # Use Apollo description field if we have no stronger signals
             if apollo_data:
                 if isinstance(apollo_data, str):
                     try:
@@ -162,97 +162,79 @@ def apply_patches():
                     except:
                         apollo_data = {}
                 
-                # Look for company description in Apollo data
-                company_description = None
-                if isinstance(apollo_data, dict) and apollo_data.get("company_description"):
-                    company_description = apollo_data.get("company_description", "").lower()
+                # Check for description field in Apollo data
+                description = None
+                if isinstance(apollo_data, dict) and apollo_data.get("description"):
+                    description = apollo_data.get("description", "").lower()
+                    logger.info(f"LEVEL 3: Found Apollo description field for {domain}")
                 
-                # If Apollo has no description, just return classification unchanged
-                if not company_description:
-                    logger.info(f"LEVEL 3: No Apollo company description for {domain}, returning unchanged")
-                    return classification
-                
-                # Check company description for MSP indicators
-                msp_indicators_in_desc = [
-                    "managed service",
-                    "it service",
-                    "technology service",
-                    "it support",
-                    "tech support",
-                    "it consulting",
-                    "managed it",
-                    "network management",
-                    "cloud service",
-                    "security service",
-                ]
-                
-                # Count matches in the description
-                msp_matches = sum(1 for indicator in msp_indicators_in_desc if indicator in company_description)
-                
-                if msp_matches >= 1:
-                    logger.info(f"LEVEL 3 DECISION: Apollo company description contains MSP indicators - classifying as MSP")
-                    classification["predicted_class"] = "Managed Service Provider"
-                    classification["detection_method"] = "apollo_description_msp"
-                    classification["confidence_scores"] = {
-                        "Managed Service Provider": 80,
-                        "Integrator - Commercial A/V": 5,
-                        "Integrator - Residential A/V": 5,
-                        "Internal IT Department": 0
-                    }
-                    classification["confidence_score"] = 80
-                    classification["max_confidence"] = 0.8
-                    return classification
-                
-                # Check for AV integrator indicators
-                av_indicators = [
-                    "audio visual",
-                    "audio-visual", 
-                    "av integration",
-                    "conference room",
-                    "sound system",
-                    "video system",
-                    "commercial audio",
-                    "home theater",
-                    "home automation"
-                ]
-                
-                av_matches = sum(1 for indicator in av_indicators if indicator in company_description)
-                
-                # If multiple AV indicators, determine if commercial or residential
-                if av_matches >= 1:
-                    # Check for commercial vs residential indicators
-                    commercial_indicators = ["commercial", "business", "corporate", "office"]
-                    residential_indicators = ["home", "residential", "house"]
+                # If description exists, check for service indicators
+                if description:
+                    # Check for MSP indicators in description
+                    msp_indicators = [
+                        "managed service",
+                        "it service", 
+                        "it support",
+                        "tech support",
+                        "it consulting",
+                        "network management",
+                        "cloud service",
+                        "security service"
+                    ]
                     
-                    commercial_count = sum(1 for indicator in commercial_indicators if indicator in company_description)
-                    residential_count = sum(1 for indicator in residential_indicators if indicator in company_description)
-                    
-                    if commercial_count > residential_count:
-                        logger.info(f"LEVEL 3 DECISION: Apollo company description indicates Commercial A/V")
-                        classification["predicted_class"] = "Integrator - Commercial A/V"
-                        classification["detection_method"] = "apollo_description_commercial_av"
+                    if any(indicator in description for indicator in msp_indicators):
+                        logger.info(f"LEVEL 3 DECISION: Apollo description indicates MSP - classifying as MSP")
+                        classification["predicted_class"] = "Managed Service Provider"
+                        classification["detection_method"] = "apollo_description_msp"
                         classification["confidence_scores"] = {
-                            "Managed Service Provider": 5,
-                            "Integrator - Commercial A/V": 80,
-                            "Integrator - Residential A/V": 10,
+                            "Managed Service Provider": 80,
+                            "Integrator - Commercial A/V": 5,
+                            "Integrator - Residential A/V": 5,
                             "Internal IT Department": 0
                         }
                         classification["confidence_score"] = 80
                         classification["max_confidence"] = 0.8
                         return classification
-                    elif residential_count > 0:
-                        logger.info(f"LEVEL 3 DECISION: Apollo company description indicates Residential A/V")
-                        classification["predicted_class"] = "Integrator - Residential A/V"
-                        classification["detection_method"] = "apollo_description_residential_av"
-                        classification["confidence_scores"] = {
-                            "Managed Service Provider": 5,
-                            "Integrator - Commercial A/V": 10,
-                            "Integrator - Residential A/V": 80,
-                            "Internal IT Department": 0
-                        }
-                        classification["confidence_score"] = 80
-                        classification["max_confidence"] = 0.8
-                        return classification
+                    
+                    # Check for AV integrator indicators
+                    av_indicators = [
+                        "audio visual", 
+                        "av integration",
+                        "conference room",
+                        "sound system",
+                        "video system",
+                        "home theater",
+                        "home automation"
+                    ]
+                    
+                    if any(indicator in description for indicator in av_indicators):
+                        # Determine if commercial or residential
+                        if any(term in description for term in ["commercial", "business", "corporate"]):
+                            logger.info(f"LEVEL 3 DECISION: Apollo description indicates Commercial AV - classifying as Commercial AV")
+                            classification["predicted_class"] = "Integrator - Commercial A/V"
+                            classification["detection_method"] = "apollo_description_commercial_av"
+                            classification["confidence_scores"] = {
+                                "Managed Service Provider": 5,
+                                "Integrator - Commercial A/V": 80,
+                                "Integrator - Residential A/V": 10,
+                                "Internal IT Department": 0
+                            }
+                            classification["confidence_score"] = 80
+                            classification["max_confidence"] = 0.8
+                            return classification
+                        elif any(term in description for term in ["home", "residential"]):
+                            logger.info(f"LEVEL 3 DECISION: Apollo description indicates Residential AV - classifying as Residential AV")
+                            classification["predicted_class"] = "Integrator - Residential A/V"
+                            classification["detection_method"] = "apollo_description_residential_av"
+                            classification["confidence_scores"] = {
+                                "Managed Service Provider": 5,
+                                "Integrator - Commercial A/V": 10,
+                                "Integrator - Residential A/V": 80,
+                                "Internal IT Department": 0
+                            }
+                            classification["confidence_score"] = 80
+                            classification["max_confidence"] = 0.8
+                            return classification
             
             # If we get here, we don't have any clear signals - return classification unchanged
             logger.info(f"NO STRONG SIGNALS: Returning original classification for {domain}")
@@ -334,7 +316,24 @@ def apply_patches():
             else:
                 company_name = classification.get("company_name", domain.split('.')[0].capitalize())
             
-            # Build description with focus on verified information
+            # Use Apollo description if available
+            if apollo_data and isinstance(apollo_data, dict) and apollo_data.get("description"):
+                apollo_description = apollo_data.get("description")
+                logger.info(f"Using Apollo description field for {domain}")
+                
+                # Create a description incorporating the Apollo description
+                if predicted_class == "Managed Service Provider":
+                    description = f"{company_name} is a Managed Service Provider. {apollo_description}"
+                elif predicted_class == "Integrator - Commercial A/V":
+                    description = f"{company_name} is a Commercial A/V Integrator. {apollo_description}"
+                elif predicted_class == "Integrator - Residential A/V":
+                    description = f"{company_name} is a Residential A/V Integrator. {apollo_description}"
+                else:  # Internal IT
+                    description = f"{company_name} is a business. {apollo_description}"
+                
+                return description
+            
+            # Build description with focus on verified information if no Apollo description
             # Start with standard opening
             if predicted_class == "Managed Service Provider":
                 description = f"{company_name} is a Managed Service Provider"
@@ -402,5 +401,37 @@ def apply_patches():
         logger.info("✅ Successfully replaced description_enhancer functions with business-focused versions")
     except Exception as e:
         logger.error(f"❌ Failed to patch description_enhancer: {e}")
+    
+    # 6. Update Apollo connector to fetch the description field
+    try:
+        from domain_classifier.enrichment import apollo_connector
+        
+        # Store the original method
+        original_format_company = apollo_connector.ApolloConnector._format_company_data
+        
+        # Create a new method that includes the description field
+        def patched_format_company_data(self, apollo_data):
+            try:
+                # Start with the original formatted data
+                formatted_data = original_format_company(self, apollo_data)
+                
+                # Ensure description field is included
+                formatted_data["description"] = apollo_data.get("description", "")
+                
+                # Log if description was found
+                if apollo_data.get("description"):
+                    logger.info(f"Found Apollo description for {apollo_data.get('name', 'unknown company')}")
+                
+                return formatted_data
+                
+            except Exception as e:
+                logger.error(f"Error in patched_format_company_data: {e}")
+                return original_format_company(self, apollo_data)
+        
+        # Apply the patch to the ApolloConnector class
+        apollo_connector.ApolloConnector._format_company_data = patched_format_company_data
+        logger.info("✅ Successfully patched apollo_connector._format_company_data to include description field")
+    except Exception as e:
+        logger.error(f"❌ Failed to patch apollo_connector: {e}")
     
     logger.info("Complete classification hierarchy fixes successfully applied")
