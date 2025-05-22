@@ -189,50 +189,53 @@ class ApolloConnector:
             logger.info("Apollo API rate limit reset, continuing with requests")
     
     def _format_company_data(self, apollo_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Format Apollo data into a standardized structure.
-        
-        Args:
-            apollo_data: The raw Apollo organization data
-            
-        Returns:
-            dict: Formatted company data
-        """
+        """Format Apollo data with extended fields."""
         try:
-            # Log a sample of the received data for debugging
-            logger.debug(f"Sample of Apollo data: {json.dumps({k: apollo_data.get(k) for k in list(apollo_data.keys())[:5]})}")
-            
-            # Better handling for employee_count with fallbacks
-            employee_count = apollo_data.get('estimated_num_employees')
-            if employee_count is None or employee_count == "" or employee_count == "null":
-                # Try alternative fields
-                employee_count = apollo_data.get('employee_count') or apollo_data.get('employees') or None
-                
-                # Log field missing/fallback
-                if employee_count is None:
-                    logger.warning(f"Employee count not available in Apollo data, using null")
-            
-            # Extract and format the most relevant fields
-            return {
+            # Extract standard fields
+            formatted_data = {
                 "name": apollo_data.get('name'),
                 "website": apollo_data.get('website_url'),
                 "industry": apollo_data.get('industry'),
-                "employee_count": employee_count,
+                "employee_count": apollo_data.get('estimated_num_employees') or apollo_data.get('employee_count'),
                 "revenue": apollo_data.get('estimated_annual_revenue'),
                 "founded_year": apollo_data.get('founded_year'),
                 "linkedin_url": apollo_data.get('linkedin_url'),
                 "phone": apollo_data.get('phone'),
                 "address": self._format_address(apollo_data),
                 "technologies": apollo_data.get('technologies', []),
-                "funding": {
-                    "total_funding": apollo_data.get('total_funding'),
-                    "latest_funding_round": apollo_data.get('latest_funding_round'),
-                    "latest_funding_amount": apollo_data.get('latest_funding_amount')
-                }
+                "description": apollo_data.get('description', ''),
             }
+            
+            # Add extended fields if available
+            extended_fields = [
+                "short_description", 
+                "long_description",
+                "keywords", 
+                "tags",
+                "specialties",
+                "organization_type", 
+                "company_type",
+                "primary_domain",
+                "social_links",
+                "tech_categories",
+                "competitors",
+                "locations",
+                "sic_codes", 
+                "naics_codes"
+            ]
+            
+            for field in extended_fields:
+                if apollo_data.get(field):
+                    formatted_data[field] = apollo_data.get(field)
+                    logger.info(f"Found additional Apollo field: {field}")
+            
+            # Log which fields we actually found
+            available_fields = [k for k, v in formatted_data.items() if v]
+            logger.info(f"Available Apollo data fields for {apollo_data.get('name', 'Unknown')}: {available_fields}")
+            
+            return formatted_data
         except Exception as e:
             logger.error(f"Error formatting Apollo data: {e}")
-            # Return a minimal set of data if we can
             return {
                 "name": apollo_data.get('name', 'Unknown'),
                 "website": apollo_data.get('website_url', 'Unknown'),
