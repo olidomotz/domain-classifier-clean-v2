@@ -1,4 +1,5 @@
 """Fixed decision_tree.py to use LLM for all cases."""
+
 import logging
 import re
 from typing import Dict, Any, Optional, Tuple, List
@@ -9,11 +10,11 @@ logger = logging.getLogger(__name__)
 def is_parked_domain(content: str, domain: str = None) -> bool:
     """
     Enhanced detection of truly parked domains vs. just having minimal content.
-    
+
     Args:
         content: The website content
         domain: Optional domain name for additional checks
-        
+
     Returns:
         bool: True if the domain is parked/inactive
     """
@@ -24,18 +25,40 @@ def is_parked_domain(content: str, domain: str = None) -> bool:
         
     content_lower = content.lower()
     
-    # 1. Check for direct explicit parking phrases (strongest indicators)
+    # 1. Direct explicit parking phrases (strongest indicators)
     explicit_parking_phrases = [
-        "domain is for sale", "buy this domain", "purchasing this domain", 
+        "domain is for sale", "buy this domain", "purchasing this domain",
         "domain may be for sale", "this domain is for sale", "parked by",
         "domain parking", "this web page is parked", "domain for sale",
         "this website is for sale", "domain name parking",
-        "purchase this domain"
+        "purchase this domain", "domain has expired", "domain available",
+        "domain not configured", "inquire about this domain"
+    ]
+    
+    # Expanded list of hosting providers and registrars
+    hosting_phrases = [
+        "godaddy", "hostgator", "bluehost", "namecheap", "dreamhost",
+        "domain registration", "web hosting service", "hosting provider",
+        "register this domain", "domain broker", "proxy error", "error connecting",
+        "domain has expired", "domain has been registered", "courtesy page",
+        "ionos", "domain.com", "hover", "namesilo", "porkbun", 
+        "network solutions", "register.com", "name.com", "enom", 
+        "dynadot", "hover", "domainking", "domainmonster", "1and1", 
+        "1&1", "ionos", "registrar", "dominio", "parkingcrew"
+    ]
+    
+    # Technical issues phrases that often appear on parked domains
+    technical_phrases = [
+        "proxy error", "error connecting", "connection error", "courtesy page",
+        "site not found", "domain not configured", "default web page",
+        "website coming soon", "under construction", "future home of",
+        "site temporarily unavailable", "domain has been registered"
     ]
     
     # Count explicit parking phrases - require at least 2 to avoid false positives
     explicit_matches = 0
     matched_phrases = []
+    
     for phrase in explicit_parking_phrases:
         if phrase in content_lower:
             explicit_matches += 1
@@ -45,33 +68,42 @@ def is_parked_domain(content: str, domain: str = None) -> bool:
     if explicit_matches >= 2:
         logger.info(f"Domain contains {explicit_matches} explicit parking phrases ({', '.join(matched_phrases)}), considering as parked")
         return True
+        
     # If just one explicit indicator, require additional evidence
     elif explicit_matches == 1:
         # Continue to other checks, but with a lower threshold
         logger.info(f"Domain contains 1 explicit parking phrase ({matched_phrases[0]}), checking for additional evidence")
+        
+        # Check for hosting providers
+        hosting_matches = sum(1 for phrase in hosting_phrases if phrase in content_lower)
+        if hosting_matches >= 1:
+            logger.info(f"Domain contains explicit parking phrase and hosting provider reference, considering as parked")
+            return True
+            
+        # Check for technical issues phrases
+        tech_matches = sum(1 for phrase in technical_phrases if phrase in content_lower)
+        if tech_matches >= 1:
+            logger.info(f"Domain contains explicit parking phrase and technical issues, considering as parked")
+            return True
     else:
         # No explicit parking phrases, require stronger evidence from other checks
         pass
     
     # 2. Check for common hosting/registrar parking indicators with additional validation
-    hosting_phrases = [
-        "godaddy", "hostgator", "bluehost", "namecheap", "dreamhost", 
-        "domain registration", "web hosting service", "hosting provider",
-        "register this domain", "domain broker", "proxy error", "error connecting",
-        "domain has expired", "domain has been registered", "courtesy page"
-    ]
-    
-    # Count hosting phrases and require more matches for positive detection
     hosting_matches = 0
     hosting_matched_phrases = []
+    
     for phrase in hosting_phrases:
         if phrase in content_lower:
             hosting_matches += 1
             hosting_matched_phrases.append(phrase)
     
-    # Require at least 2 hosting phrases (more strict than before) to reduce false positives
-    if hosting_matches >= 2:
-        logger.info(f"Domain contains {hosting_matches} hosting/registrar phrases ({', '.join(hosting_matched_phrases)}), considering as parked")
+    # Check for technical issues too
+    tech_matches = sum(1 for phrase in technical_phrases if phrase in content_lower)
+    
+    # If we have multiple hosting phrases or hosting + technical issues, likely parked
+    if (hosting_matches >= 2) or (hosting_matches >= 1 and tech_matches >= 1):
+        logger.info(f"Domain contains hosting/registrar phrases and technical issues, considering as parked")
         return True
     
     # 3. Check for minimal content with specific patterns (require multiple indicators)
@@ -82,6 +114,7 @@ def is_parked_domain(content: str, domain: str = None) -> bool:
         if domain and domain.split('.')[0].lower() in content_lower:
             domain_root = domain.split('.')[0].lower()
             domain_mentions = content_lower.count(domain_root)
+            
             if domain_mentions >= 2 and len(content.strip()) < 150:
                 indicators_found += 1
                 logger.info(f"Found indicator: Multiple domain name mentions in minimal content")
@@ -105,15 +138,15 @@ def is_parked_domain(content: str, domain: str = None) -> bool:
                 logger.info(f"Found indicator: Minimal HTML structure with no content indicators")
         
         # c) Check for organization-specific terms (to avoid false positives for businesses)
-        org_indicators = ["company", "business", "service", "product", "about us", "contact", 
-                         "team", "mission", "vision", "customer", "client", "solution", 
+        org_indicators = ["company", "business", "service", "product", "about us", "contact",
+                         "team", "mission", "vision", "customer", "client", "solution",
                          "technology", "industry", "platform", "app", "application"]
-        
+                         
         # If org indicators are present, this is likely a real site with minimal content, not parked
         if any(indicator in content_lower for indicator in org_indicators):
             logger.info(f"Found organization indicators in content, not considering as parked")
             return False
-        
+            
         # d) Check for few unique words
         words = re.findall(r'\b\w+\b', content_lower)
         unique_words = set(words)
@@ -121,17 +154,31 @@ def is_parked_domain(content: str, domain: str = None) -> bool:
         if len(unique_words) < 10:  # Decreased from 15 to be more strict
             indicators_found += 1
             logger.info(f"Found indicator: Very few unique words ({len(unique_words)})")
-        
+            
         # Require at least 3 indicators for minimal content (increased from 2 to avoid false positives)
         if indicators_found >= 3:
             logger.info(f"Domain has {indicators_found} indicators of being parked with minimal content")
             return True
     
-    # 4. Check specifically for proxy errors with hosting mentions (like crapanzano.net example)
+    # 4. Check specifically for proxy errors with hosting mentions
     if len(content.strip()) < 300 and "proxy" in content_lower and any(phrase in content_lower for phrase in ["godaddy", "domain", "hosting"]):
         logger.info("Found proxy error with hosting service mentions, likely parked")
         return True
         
+    # 5. Special check for minimal content with specific technical errors
+    if len(content.strip()) < 500:
+        if "site is temporarily unavailable" in content_lower:
+            logger.info("Found 'site is temporarily unavailable' message, likely parked/inactive")
+            return True
+            
+        if "this site requires javascript" in content_lower and len(content.strip()) < 200:
+            logger.info("Found minimal content with JavaScript requirement, likely parked/placeholder")
+            return True
+            
+        if "default web page" in content_lower and "server administrator" in content_lower:
+            logger.info("Found default web server page, likely unconfigured domain")
+            return True
+
     return False
 
 def check_special_domain_cases(domain: str, text_content: str) -> Optional[Dict[str, Any]]:
@@ -140,11 +187,11 @@ def check_special_domain_cases(domain: str, text_content: str) -> Optional[Dict[
     
     CRITICAL CHANGE: Instead of returning a complete classification,
     return enhancement information that can be applied after LLM classification.
-    
+
     Args:
         domain: The domain name
         text_content: The website content
-        
+
     Returns:
         Optional[Dict[str, Any]]: Enhancement info if special case, None otherwise
     """
@@ -187,9 +234,34 @@ def check_special_domain_cases(domain: str, text_content: str) -> Optional[Dict[
             "detection_method": "special_domain_knowledge"
         }
         
+    # Check for IT Solutions patterns in domain name
+    if ("it" in domain_lower or "tech" in domain_lower) and "solution" in domain_lower:
+        logger.info(f"Domain {domain} contains IT Solutions pattern, likely an MSP")
+        return {
+            "special_domain": True,
+            "suggested_class": "Managed Service Provider",
+            "industry": "information technology",
+            "description_hint": "IT solutions and managed services provider",
+            "confidence_boost": 0.2,
+            "detection_method": "domain_pattern_recognition"
+        }
+        
+    # Check for managed services in domain name
+    if "managed" in domain_lower and ("service" in domain_lower or "it" in domain_lower):
+        logger.info(f"Domain {domain} contains managed services pattern, likely an MSP")
+        return {
+            "special_domain": True,
+            "suggested_class": "Managed Service Provider",
+            "industry": "managed IT services",
+            "description_hint": "managed IT service provider",
+            "confidence_boost": 0.2,
+            "detection_method": "domain_pattern_recognition"
+        }
+        
     # Check for other vacation/travel-related domains
     vacation_terms = ["vacation", "holiday", "rental", "booking", "hotel", "travel", "accommodation", "ferie"]
     found_terms = [term for term in vacation_terms if term in domain_lower]
+    
     if found_terms:
         logger.warning(f"Domain {domain} contains vacation/travel terms: {found_terms}")
         
@@ -214,6 +286,7 @@ def check_special_domain_cases(domain: str, text_content: str) -> Optional[Dict[
     # Check for transportation/logistics companies
     transport_terms = ["trucking", "transport", "logistics", "shipping", "freight", "delivery", "carrier"]
     found_transport_terms = [term for term in transport_terms if term in domain_lower]
+    
     if found_transport_terms:
         logger.warning(f"Domain {domain} contains transportation terms: {found_transport_terms}")
         
@@ -235,15 +308,42 @@ def check_special_domain_cases(domain: str, text_content: str) -> Optional[Dict[
                 "detection_method": "domain_pattern_recognition"
             }
             
+    # Check for audio-visual or A/V in domain
+    av_terms = ["av", "audio", "visual", "theater", "cinema", "sound"]
+    found_av_terms = [term for term in av_terms if term in domain_lower]
+    
+    if found_av_terms and len(found_av_terms) >= 2:
+        # Differentiate between commercial and residential
+        if any(term in domain_lower for term in ["home", "residential", "smart"]):
+            logger.info(f"Domain {domain} likely a Residential A/V Integrator based on domain terms")
+            return {
+                "special_domain": True,
+                "suggested_class": "Integrator - Residential A/V",
+                "industry": "home automation",
+                "description_hint": "residential audio-visual integration and home automation",
+                "confidence_boost": 0.15,
+                "detection_method": "domain_pattern_recognition"
+            }
+        else:
+            logger.info(f"Domain {domain} likely a Commercial A/V Integrator based on domain terms")
+            return {
+                "special_domain": True,
+                "suggested_class": "Integrator - Commercial A/V",
+                "industry": "audio visual integration",
+                "description_hint": "commercial audio-visual integration services",
+                "confidence_boost": 0.15,
+                "detection_method": "domain_pattern_recognition"
+            }
+            
     return None
 
 def create_process_did_not_complete_result(domain: str = None) -> Dict[str, Any]:
     """
     Create a standardized result for when processing couldn't complete.
-    
+
     Args:
         domain: The domain name
-        
+
     Returns:
         dict: Standardized process failure result
     """
@@ -270,11 +370,11 @@ def create_process_did_not_complete_result(domain: str = None) -> Dict[str, Any]
 def create_parked_domain_result(domain: str = None, crawler_type: str = None) -> Dict[str, Any]:
     """
     Create a standardized result for parked domains.
-    
+
     Args:
         domain: The domain name
         crawler_type: The type of crawler that detected the parked domain
-        
+
     Returns:
         dict: Standardized parked domain result
     """
@@ -283,7 +383,7 @@ def create_parked_domain_result(domain: str = None, crawler_type: str = None) ->
     # If crawler_type is None, set a default
     if crawler_type is None:
         crawler_type = "early_detection"
-    
+        
     return {
         "processing_status": 1,
         "is_service_business": None,
@@ -307,12 +407,12 @@ def create_parked_domain_result(domain: str = None, crawler_type: str = None) ->
 def check_industry_context(content: str, apollo_data: Optional[Dict] = None, ai_data: Optional[Dict] = None) -> Tuple[bool, float]:
     """
     Check industry context from Apollo data and AI extraction to determine if likely service business.
-    
+
     Args:
         content: Website content
         apollo_data: Apollo company data if available
         ai_data: AI extracted company data if available
-        
+
     Returns:
         tuple: (is_service_business, confidence)
     """
@@ -323,9 +423,9 @@ def check_industry_context(content: str, apollo_data: Optional[Dict] = None, ai_
     
     # Non-service industries list
     non_service_industries = [
-        'manufacturing', 'forging', 'steel', 'metals', 'industrial', 
+        'manufacturing', 'forging', 'steel', 'metals', 'industrial',
         'construction', 'factory', 'production', 'fabrication',
-        'retail', 'shop', 'store', 'ecommerce', 'e-commerce', 
+        'retail', 'shop', 'store', 'ecommerce', 'e-commerce',
         'hospitality', 'hotel', 'restaurant', 'tourism', 'vacation',
         'healthcare', 'medical', 'hospital', 'clinic',
         'education', 'school', 'university', 'academic',
@@ -344,11 +444,13 @@ def check_industry_context(content: str, apollo_data: Optional[Dict] = None, ai_
             except:
                 # If parsing fails, treat as empty dict
                 apollo_data = {}
-    
+                
         # Now safely access industry field
         industry = apollo_data.get('industry', '') if isinstance(apollo_data, dict) else ''
+        
         if industry:
             industry = industry.lower()
+            
             # Check for non-service industry matches
             for term in non_service_industries:
                 if term in industry:
