@@ -1,9 +1,8 @@
-"""Complete fixed enrich.py to properly handle formatted classification responses and disable cross-validation."""
+"""Complete fixed enrich.py to properly handle formatted classification responses and DNS errors."""
 
 import logging
 import traceback
 import re
-
 from flask import request, jsonify, current_app
 
 # Import utilities
@@ -46,7 +45,7 @@ def register_enrich_routes(app, snowflake_conn):
         # Handle preflight requests
         if request.method == 'OPTIONS':
             return '', 204
-
+        
         try:
             data = request.json
             input_value = data.get('url', '').strip()
@@ -54,20 +53,20 @@ def register_enrich_routes(app, snowflake_conn):
             
             # Add parameter to control response format
             use_new_format = data.get('use_new_format', True) if has_api_formatter else False
-
+            
             if not input_value:
                 return jsonify({"error": "URL or email is required"}), 400
-
+            
             # CRITICAL: Add detailed logging
-            logger.info("="*80)
+            logger.info("=" * 80)
             logger.info(f"CLASSIFY AND ENRICH REQUEST for: {input_value}")
             logger.info(f"Force reclassify: {force_reclassify}")
-            logger.info("="*80)
-
+            logger.info("=" * 80)
+            
             # Determine if input is an email
             is_email = '@' in input_value
             email = input_value if is_email else None
-
+            
             # Extract domain for checking
             domain = None
             if is_email and '@' in input_value:
@@ -77,24 +76,23 @@ def register_enrich_routes(app, snowflake_conn):
             else:
                 # Basic domain extraction for URL
                 domain = normalize_domain(input_value)
-
+            
             # Create URL for checks and displaying
             url = f"https://{domain}"
-
+            
             # Cache for storing domain content to avoid multiple queries
             domain_content_cache = None
-
+            
             # Check for domain override before any other processing
             domain_override = check_domain_override(domain) if 'check_domain_override' in globals() else None
-
             if domain_override:
                 # Add email to response if input was an email
                 if email:
                     domain_override["email"] = email
-
+                
                 # Add website URL for clickable link
                 domain_override["website_url"] = url
-
+                
                 # Add final classification based on predicted class
                 if domain_override.get("predicted_class") == "Managed Service Provider":
                     domain_override["final_classification"] = "1-MSP"
@@ -104,26 +102,26 @@ def register_enrich_routes(app, snowflake_conn):
                     domain_override["final_classification"] = "4-Residential Integrator"
                 else:
                     domain_override["final_classification"] = "2-Internal IT"
-
+                
                 # Add crawler_type and classifier_type to ensure they appear at the bottom
                 domain_override["crawler_type"] = "override"
                 domain_override["classifier_type"] = "override"
-
+                
                 # Return the override directly with appropriate formatting
                 logger.info(f"Sending override response to client: {domain_override}")
-
+                
                 if use_new_format and has_api_formatter:
                     return jsonify(format_api_response(domain_override)), 200
                 else:
                     return jsonify(domain_override), 200
-
+            
             # Direct check if domain is worth crawling or is parked
             worth_crawling, has_dns, dns_error, potentially_flaky = is_domain_worth_crawling(domain)
-
+            
             # Check for DNS resolution failure
-            if not has_dns and dns_error != "parked_domain":
+            if not has_dns:
                 logger.info(f"Domain {domain} has DNS resolution issues: {dns_error}")
-
+                
                 # Create an error result
                 error_result = create_error_result(
                     domain,
@@ -132,69 +130,204 @@ def register_enrich_routes(app, snowflake_conn):
                     email,
                     "early_check"
                 )
-
+                
                 error_result["website_url"] = url
                 error_result["final_classification"] = "7-No Website available"
-
-                # We'll still attempt to enrich from Apollo
-                logger.info(f"DNS issues for {domain}, but continuing with enrichment anyway")
-
+                
+                # Format and return immediately - DO NOT CONTINUE WITH ENRICHMENT
+                if use_new_format and has_api_formatter:
+                    formatted_result = format_api_response(error_result)
+                    return jsonify(formatted_result), 200
+                else:
+                    return jsonify(error_result), 200
+            
             # Check for parked domain
             if dns_error == "parked_domain" or not worth_crawling:
                 logger.info(f"Domain {domain} detected as parked domain during initial check")
-
+                
                 # Create a proper parked domain result
                 parked_result = create_parked_domain_result(domain, crawler_type="early_check_parked")
-
+                
                 # Process it through the normal result processor
                 result = process_fresh_result(parked_result, domain, email, url)
-
+                
                 # Ensure proper classification and fields
                 result["final_classification"] = "6-Parked Domain - no enrichment"
                 result["crawler_type"] = "early_check_parked"
                 result["classifier_type"] = "early_detection"
                 result["is_parked"] = True
-
+                
                 # Add email and URL if provided
                 if email:
                     result["email"] = email
-
+                
                 result["website_url"] = url
-
-                # We'll still attempt Apollo enrichment
-                logger.info(f"Parked domain {domain}, but continuing with enrichment anyway")
-
+                
+                # Try to enrich with Apollo data for parked domains
+                try:
+                    # Import Apollo connector
+                    from domain_classifier.enrichment.apollo_connector import ApolloConnector
+                    
+                    # Initialize Apollo connector
+                    apollo = ApolloConnector()
+                    
+                    # Get Apollo data
+                    apollo_data = apollo.enrich_company(domain)
+                    
+                    if apollo_data and isinstance(apollo_data, dict) and any(apollo_data.values()):
+                        # Store Apollo data in result
+                        result["apollo_data"] = apollo_data
+                        
+                        # Try to classify based on Apollo data
+                        if "short_description" in apollo_data or "description" in apollo_data:
+                            # Get description from Apollo
+                            description = None
+                            for field in ["short_description", "description", "long_description"]:
+                                if field in apollo_data:
+                                    description = apollo_data.get(field)
+                                    break
+                            
+                            if description:
+                                # Try to classify using the description
+                                try:
+                                    # Import LLM classifier
+                                    from domain_classifier.classifiers.llm_classifier import LLMClassifier
+                                    
+                                    # Get API key
+                                    import os
+                                    api_key = os.environ.get("ANTHROPIC_API_KEY")
+                                    
+                                    if api_key:
+                                        # Create classifier
+                                        classifier = LLMClassifier(api_key=api_key)
+                                        
+                                        # Run classification on Apollo description
+                                        classification = classifier.classify(
+                                            content=f"Company description from Apollo: {description}",
+                                            domain=domain
+                                        )
+                                        
+                                        if classification:
+                                            # Update result with classification
+                                            result.update(classification)
+                                            result["detection_method"] = "apollo_data_classification"
+                                            result["source"] = "apollo_data"
+                                            
+                                            # Update final_classification based on the new predicted_class
+                                            result["final_classification"] = determine_final_classification(result)
+                                except Exception as e:
+                                    logger.error(f"Error classifying parked domain with Apollo data: {e}")
+                        
+                        # Update final classification if we have Apollo data but didn't reclassify
+                        if result.get("predicted_class") == "Parked Domain":
+                            result["final_classification"] = "5-Parked Domain with partial enrichment"
+                except Exception as e:
+                    logger.error(f"Error enriching parked domain with Apollo data: {e}")
+                
+                # Format and return
+                if use_new_format and has_api_formatter:
+                    return jsonify(format_api_response(result)), 200
+                else:
+                    return jsonify(result), 200
+            
             # Check for early parked domain detection using direct crawl
             try:
                 from domain_classifier.crawlers.direct_crawler import direct_crawl
-
+                
                 logger.info(f"Performing quick check for parked domain before enriching: {domain}")
+                
                 quick_check_content, (error_type, error_detail), quick_crawler_type = direct_crawl(url, timeout=5.0)
-
+                
                 # Check if this is a parked domain
                 if error_type == "is_parked" or (quick_check_content and is_parked_domain(quick_check_content, domain)):
                     logger.info(f"Quick check detected parked domain: {domain}")
+                    
                     parked_result = create_parked_domain_result(domain, crawler_type="quick_check_parked")
-
+                    
                     # Process the result through the normal result processor
                     result = process_fresh_result(parked_result, domain, email, url)
-
+                    
                     # Ensure proper classification and fields
                     result["final_classification"] = "6-Parked Domain - no enrichment"
                     result["crawler_type"] = "quick_check_parked"
                     result["classifier_type"] = "early_detection"
                     result["is_parked"] = True
-
+                    
                     # Add email and URL if provided
                     if email:
                         result["email"] = email
+                    
                     result["website_url"] = url
-
-                    # We'll still attempt Apollo enrichment
-                    logger.info(f"Parked domain detected for {domain}, but continuing with enrichment anyway")
+                    
+                    # Try to enrich with Apollo data for parked domains
+                    try:
+                        # Import Apollo connector
+                        from domain_classifier.enrichment.apollo_connector import ApolloConnector
+                        
+                        # Initialize Apollo connector
+                        apollo = ApolloConnector()
+                        
+                        # Get Apollo data
+                        apollo_data = apollo.enrich_company(domain)
+                        
+                        if apollo_data and isinstance(apollo_data, dict) and any(apollo_data.values()):
+                            # Store Apollo data in result
+                            result["apollo_data"] = apollo_data
+                            
+                            # Try to classify based on Apollo data
+                            if "short_description" in apollo_data or "description" in apollo_data:
+                                # Get description from Apollo
+                                description = None
+                                for field in ["short_description", "description", "long_description"]:
+                                    if field in apollo_data:
+                                        description = apollo_data.get(field)
+                                        break
+                                
+                                if description:
+                                    # Try to classify using the description
+                                    try:
+                                        # Import LLM classifier
+                                        from domain_classifier.classifiers.llm_classifier import LLMClassifier
+                                        
+                                        # Get API key
+                                        import os
+                                        api_key = os.environ.get("ANTHROPIC_API_KEY")
+                                        
+                                        if api_key:
+                                            # Create classifier
+                                            classifier = LLMClassifier(api_key=api_key)
+                                            
+                                            # Run classification on Apollo description
+                                            classification = classifier.classify(
+                                                content=f"Company description from Apollo: {description}",
+                                                domain=domain
+                                            )
+                                            
+                                            if classification:
+                                                # Update result with classification
+                                                result.update(classification)
+                                                result["detection_method"] = "apollo_data_classification"
+                                                result["source"] = "apollo_data"
+                                                
+                                                # Update final_classification based on the new predicted_class
+                                                result["final_classification"] = determine_final_classification(result)
+                                    except Exception as e:
+                                        logger.error(f"Error classifying parked domain with Apollo data: {e}")
+                            
+                            # Update final classification if we have Apollo data but didn't reclassify
+                            if result.get("predicted_class") == "Parked Domain":
+                                result["final_classification"] = "5-Parked Domain with partial enrichment"
+                    except Exception as e:
+                        logger.error(f"Error enriching parked domain with Apollo data: {e}")
+                    
+                    # Format and return
+                    if use_new_format and has_api_formatter:
+                        return jsonify(format_api_response(result)), 200
+                    else:
+                        return jsonify(result), 200
             except Exception as e:
                 logger.warning(f"Early parked domain check failed in enrichment route: {e}")
-
+            
             # First perform standard classification by making an internal request
             # We'll use the routes directly from the app, rather than importing functions
             
@@ -215,11 +348,11 @@ def register_enrich_routes(app, snowflake_conn):
                 "crawler_type": "pending",
                 "source": "initial"
             }
-
+            
             # If email was provided, add it
             if email:
                 classification_result["email"] = email
-
+            
             # Call the registered classify-domain route directly using the Flask test client
             with app.test_client() as client:
                 # Create the request payload
@@ -229,18 +362,20 @@ def register_enrich_routes(app, snowflake_conn):
                     'force_reclassify': True,  # Always force reclassify
                     'force_llm': True  # Ensure LLM is used for classification
                 }
-
+                
                 logger.info(f"Sending internal classification request for {domain} with force_reclassify=True and force_llm=True")
+                
                 response = client.post('/classify-domain', json=request_data)
-
+                
                 # IMPROVED: Better handling of the response
                 status_code = response.status_code
                 logger.info(f"Classification result status code: {status_code}")
-
+                
                 if status_code == 200:
                     try:
                         # Get JSON response and log its structure
                         response_data = response.get_json()
+                        
                         if response_data:
                             logger.info(f"Classification response keys: {list(response_data.keys())}")
                             
@@ -294,10 +429,11 @@ def register_enrich_routes(app, snowflake_conn):
                                     logger.warning(f"⚠️ LLM classifier was not used for {domain}. Using {classification_result.get('classifier_type', 'unknown')} instead.")
                         else:
                             logger.error("Response JSON is None or empty")
+                    
                     except Exception as parse_error:
                         logger.error(f"Error parsing response JSON: {parse_error}")
                         logger.error(f"Response content: {response.data}")
-
+                
                 # If predicted_class is empty, that's a critical error
                 if not classification_result.get("predicted_class"):
                     logger.error(f"❌ CRITICAL ERROR: predicted_class missing or empty for {domain}")
@@ -313,44 +449,44 @@ def register_enrich_routes(app, snowflake_conn):
                     }
                     classification_result["detection_method"] = "emergency_fallback"
                     classification_result["explanation"] = f"Unable to determine classification for {domain} due to technical issues. Defaulting to Internal IT."
-
-            # Log complete classification result
-            logger.info(f"Classification result after test client: {classification_result.get('predicted_class', 'unknown')}")
-
-            # We'll proceed with enrichment regardless of classification status
-            # But we'll log a warning if the status code indicates an error
-            if status_code >= 400:
-                logger.warning(f"Classification returned status {status_code}, but continuing with enrichment anyway")
-
+                
+                # Log complete classification result
+                logger.info(f"Classification result after test client: {classification_result.get('predicted_class', 'unknown')}")
+                
+                # We'll proceed with enrichment regardless of classification status
+                # But we'll log a warning if the status code indicates an error
+                if status_code >= 400:
+                    logger.warning(f"Classification returned status {status_code}, but continuing with enrichment anyway")
+            
             # Make sure we have the minimum required fields for enrichment
             if "domain" not in classification_result:
                 # We should already have the domain from earlier
                 classification_result["domain"] = domain
-
+            
             # Ensure final_classification is set for error results
             if "final_classification" not in classification_result:
                 classification_result["final_classification"] = determine_final_classification(classification_result)
-
+            
             # Add website URL for clickable link if not present
             if "website_url" not in classification_result:
                 classification_result["website_url"] = url
-
+            
             # Add email to response if input was an email and not already present
             if email and "email" not in classification_result:
                 classification_result["email"] = email
-
+            
             # Extract domain, email from classification result
             domain = classification_result.get('domain', domain)  # Use the extracted domain if not in result
             email = classification_result.get('email', email)  # Use the extracted email if not in result
             crawler_type = classification_result.get('crawler_type', "not_available")  # Get crawler type from classification result
-
+            
             if not domain:
                 logger.error("No domain found in classification result and couldn't extract from input")
                 return jsonify({"error": "Failed to extract domain for enrichment"}), 400
-
+            
             # Initialize variables for Apollo data
             apollo_company_data = None
-
+            
             # Check if there's already Apollo data in the cached result
             if "apollo_data" in classification_result and classification_result["apollo_data"]:
                 logger.info(f"Using cached Apollo data for {domain}")
@@ -358,27 +494,27 @@ def register_enrich_routes(app, snowflake_conn):
             else:
                 # Import Apollo connector here to avoid circular imports
                 from domain_classifier.enrichment.apollo_connector import ApolloConnector
-
+                
                 # Initialize Apollo connector
                 apollo = ApolloConnector()
-
+                
                 # Enrich with Apollo company data only if we don't already have it
                 apollo_company_data = apollo.enrich_company(domain)
                 logger.info(f"Retrieved fresh Apollo data for {domain}")
-
+            
             from domain_classifier.enrichment.description_enhancer import enhance_company_description, generate_detailed_description
-
+            
             # Don't look up person data to save Apollo credits
             person_data = None
-
+            
             # Get the website content for AI extraction - do this ONCE and cache it
             if domain_content_cache is None:
                 domain_content_cache = snowflake_conn.get_domain_content(domain)
                 logger.info(f"Retrieved and cached content for {domain} (length: {len(domain_content_cache) if domain_content_cache else 0})")
-
+            
             # Always attempt AI extraction, regardless of Apollo data
             logger.info(f"Attempting AI extraction for {domain}")
-
+            
             # Extract company data using AI from the website content
             ai_company_data = None
             if domain_content_cache:
@@ -387,58 +523,60 @@ def register_enrich_routes(app, snowflake_conn):
                     domain,
                     classification_result
                 )
-
+                
                 # Add the AI-extracted data to the result
                 if ai_company_data:
                     logger.info(f"Successfully extracted AI company data for {domain}")
                     classification_result["ai_company_data"] = ai_company_data
             else:
                 logger.warning(f"No website content available for AI extraction for {domain}")
-
+            
             # Run domain word analysis
             domain_word_scores = analyze_domain_words(domain)
-
+            
             # Check industry context
             is_service, industry_confidence = check_industry_context(
                 domain_content_cache,
                 apollo_company_data,
                 ai_company_data
             )
-
+            
             # Log results of enhanced analysis
             logger.info(f"Domain word analysis for {domain}: {domain_word_scores}")
             logger.info(f"Industry context for {domain}: is_service={is_service}, confidence={industry_confidence}")
-
+            
             # Import recommendation engine
             from domain_classifier.enrichment.recommendation_engine import DomotzRecommendationEngine
-
+            
             # Create an instance of the recommendation engine
             recommendation_engine = DomotzRecommendationEngine()
-
+            
             # Store original class for comparison after cross-validation
             original_class = classification_result.get('predicted_class', '')
             original_description = classification_result.get('company_description', '')
-
+            
             # CRITICAL CHANGE: Skip cross-validation completely
             # This prevents the original LLM classification from being overridden
             # classification_result = reconcile_classification(classification_result, apollo_company_data, ai_company_data)
-
+            
             # Generate recommendations based on current classification
             recommendations = recommendation_engine.generate_recommendations(
                 classification_result.get('predicted_class'),
                 apollo_company_data
             )
-
+            
             # Step 1: First enhance with Apollo data
             if apollo_company_data:
                 logger.info(f"Enhancing description with Apollo data for {domain}")
+                
                 basic_enhanced_description = enhance_company_description(
                     classification_result.get("company_description", ""),
                     apollo_company_data,
                     classification_result
                 )
+                
                 classification_result["company_description"] = basic_enhanced_description
-
+            
             # Step 2: Then use Claude to generate a more detailed description
             try:
                 detailed_description = generate_detailed_description(
@@ -446,7 +584,7 @@ def register_enrich_routes(app, snowflake_conn):
                     apollo_company_data,
                     None  # No person data passed
                 )
-
+                
                 if detailed_description and len(detailed_description) > 50:
                     # Check for potential industry mismatches
                     industry_mismatch = False
@@ -460,17 +598,16 @@ def register_enrich_routes(app, snowflake_conn):
                     if classification_result.get('predicted_class') == "Internal IT Department" and ('audio-visual' in detailed_description.lower() or 'av integration' in detailed_description.lower()):
                         logger.warning(f"Detected potential fabrication: Internal IT with AV services for {domain}")
                         industry_mismatch = True
-                        
+                    
                     if not industry_mismatch:
                         classification_result["company_description"] = detailed_description
                         logger.info(f"Updated description with detailed Claude-generated version for {domain}")
                 else:
                     logger.warning(f"Generated description was too short or empty for {domain}")
-                    
             except Exception as desc_error:
                 logger.error(f"Error generating detailed description: {desc_error}")
                 # Keep the basic enhanced description if the detailed one fails
-
+            
             # Add enrichment data to classification result
             classification_result['apollo_data'] = apollo_company_data or {}
             
@@ -480,7 +617,7 @@ def register_enrich_routes(app, snowflake_conn):
             # Make sure the crawler_type is preserved from the original classification
             if not classification_result.get('crawler_type') and crawler_type:
                 classification_result['crawler_type'] = crawler_type
-                
+            
             # UPDATED: Use the ensure_classifier_type helper to avoid warnings
             classification_result = ensure_classifier_type(classification_result, domain)
             
@@ -495,7 +632,7 @@ def register_enrich_routes(app, snowflake_conn):
                 if "name" in ai_company_data:
                     # Log warning if there's a suspicious navigation element
                     if ai_company_data["name"] and re.search(r'navigation|menu|open|close|header|footer',
-                                                           ai_company_data.get('name', ''), re.IGNORECASE):
+                                                          ai_company_data.get('name', ''), re.IGNORECASE):
                         logger.warning(f"Suspicious AI-extracted company name detected: {ai_company_data.get('name')}. Using Apollo data instead.")
                         ai_company_data["name"] = apollo_company_data.get("name", ai_company_data["name"])
                 
@@ -509,7 +646,7 @@ def register_enrich_routes(app, snowflake_conn):
             if apollo_company_data and apollo_company_data.get("name"):
                 classification_result['company_name'] = apollo_company_data.get("name")
             elif ai_company_data and ai_company_data.get("name") and not re.search(r'navigation|menu|open|close|header|footer',
-                                                                                 ai_company_data["name"], re.IGNORECASE):
+                                                                               ai_company_data["name"], re.IGNORECASE):
                 classification_result['company_name'] = ai_company_data.get("name")
             else:
                 # Fallback to domain-derived name
@@ -541,7 +678,7 @@ def register_enrich_routes(app, snowflake_conn):
                 return jsonify(format_api_response(classification_result)), 200
             else:
                 return jsonify(classification_result), 200
-                
+        
         except Exception as e:
             logger.error(f"Error in classify-and-enrich: {e}\n{traceback.format_exc()}")
             
@@ -562,7 +699,7 @@ def register_enrich_routes(app, snowflake_conn):
             # Ensure final_classification is set for error results
             if "final_classification" not in error_result:
                 error_result["final_classification"] = determine_final_classification(error_result)
-                
+            
             # Format the response if requested
             use_new_format = data.get('use_new_format', True) if 'data' in locals() else True
             if use_new_format and has_api_formatter:
