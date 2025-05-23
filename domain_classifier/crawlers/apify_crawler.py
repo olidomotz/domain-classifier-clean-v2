@@ -1,11 +1,12 @@
 """Multi-crawler module for domain classification that tries Direct crawler first, then Scrapy, then Apify."""
+
 import requests
 import logging
 import time
 import re
 import socket
 from urllib.parse import urlparse
-from typing import Tuple, Optional, Any
+from typing import Tuple, Optional, Any, List
 
 # Explicitly define what should be exported from this module
 __all__ = ['crawl_website', 'detect_error_type', 'apify_crawl']
@@ -41,7 +42,7 @@ def track_crawler_usage(crawler_type):
         CRAWLER_STATS["scrapy"] += 1
     elif "apify" in crawler_type.lower():
         CRAWLER_STATS["apify"] += 1
-        
+    
     # Reset every 24 hours
     if time.time() - CRAWLER_STATS["last_reset"] > 86400:
         logger.info(f"Resetting crawler stats. Previous: {CRAWLER_STATS}")
@@ -63,21 +64,21 @@ def track_crawler_usage(crawler_type):
         logger.info(f"Direct: {old_stats['direct']} ({direct_pct:.1f}%)")
         logger.info(f"Scrapy: {old_stats['scrapy']} ({scrapy_pct:.1f}%)")
         logger.info(f"Apify: {old_stats['apify']} ({apify_pct:.1f}%)")
-        
+    
     # Log current stats every 10 crawls
     if CRAWLER_STATS["total"] % 10 == 0:
         total = max(1, CRAWLER_STATS["total"])
         logger.info(f"Crawler usage stats: direct={CRAWLER_STATS['direct']} ({CRAWLER_STATS['direct']/total*100:.1f}%), "
-                    f"scrapy={CRAWLER_STATS['scrapy']} ({CRAWLER_STATS['scrapy']/total*100:.1f}%), "
-                    f"apify={CRAWLER_STATS['apify']} ({CRAWLER_STATS['apify']/total*100:.1f}%)")
+                   f"scrapy={CRAWLER_STATS['scrapy']} ({CRAWLER_STATS['scrapy']/total*100:.1f}%), "
+                   f"apify={CRAWLER_STATS['apify']} ({CRAWLER_STATS['apify']/total*100:.1f}%)")
 
 def detect_error_type(error_message: str) -> Tuple[str, str]:
     """
     Analyze error message to determine the specific type of error.
-    
+
     Args:
         error_message (str): The error message string
-        
+
     Returns:
         tuple: (error_type, detailed_message)
     """
@@ -124,14 +125,15 @@ def detect_error_type(error_message: str) -> Tuple[str, str]:
 def quick_parked_check(url: str) -> Tuple[bool, Optional[str]]:
     """
     Perform a quick check to see if a domain is likely parked.
-    
+    Enhanced with better parked domain detection.
+
     Args:
         url (str): The URL to check
-        
+
     Returns:
         tuple: (is_parked, content)
-            - is_parked: Whether domain is parked
-            - content: Any content retrieved during check
+        - is_parked: Whether domain is parked
+        - content: Any content retrieved during check
     """
     try:
         # Parse domain for checking
@@ -143,7 +145,7 @@ def quick_parked_check(url: str) -> Tuple[bool, Optional[str]]:
         try:
             # Try quick direct request with HTTPS
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                 'Accept-Language': 'en-US,en;q=0.5',
                 'Connection': 'keep-alive',
@@ -158,42 +160,61 @@ def quick_parked_check(url: str) -> Tuple[bool, Optional[str]]:
             if response.history:
                 redirect_chain = " -> ".join([r.url for r in response.history])
                 final_url = response.url
+                
                 logger.info(f"Followed HTTPS redirect chain: {redirect_chain} -> {final_url}")
+                
+                # If redirected to a different domain, update for parked check
+                final_domain = urlparse(final_url).netloc
+                if final_domain != domain and final_domain.startswith('www.'):
+                    final_domain = final_domain[4:]
+                    
+                if final_domain != domain:
+                    logger.info(f"Domain redirected from {domain} to {final_domain}")
+                    domain = final_domain
             
             # Get a chunk of content
             content = next(response.iter_content(2048), None)
+            
             if content:
                 content_str = content.decode('utf-8', errors='ignore')
                 
                 # Check for common parked domain indicators in this small chunk
                 parked_indicators = [
-                    "domain is for sale", "buy this domain", "domain parking", 
-                    "parked by", "godaddy", "domain registration", "hosting provider"
+                    "domain is for sale", "buy this domain", "domain parking",
+                    "parked by", "godaddy", "domain registration", "hosting provider",
+                    "domain has expired", "domain available", "domain not configured",
+                    "website coming soon", "under construction", "future home",
+                    "site temporarily unavailable"
                 ]
                 
                 if any(indicator in content_str.lower() for indicator in parked_indicators):
                     logger.info(f"Quick check found parked domain indicators for {domain}")
                     return True, content_str
-                    
+                
                 # If not immediately obvious from first chunk, get more content
                 full_content = content_str
+                
                 try:
                     # Get up to 10KB more
                     for _ in range(5):
                         chunk = next(response.iter_content(2048), None)
                         if not chunk:
                             break
+                            
                         chunk_str = chunk.decode('utf-8', errors='ignore')
                         full_content += chunk_str
                     
                     from domain_classifier.classifiers.decision_tree import is_parked_domain
+                    
                     if is_parked_domain(full_content, domain):
                         logger.info(f"Quick check determined {domain} is a parked domain")
                         return True, full_content
+                
                 except Exception as e:
                     logger.warning(f"Error in additional content check: {e}")
-                    
+                
                 return False, full_content
+        
         except (requests.exceptions.SSLError, requests.exceptions.ConnectionError) as e:
             logger.warning(f"HTTPS failed in quick parked check: {e}, trying HTTP")
             
@@ -202,7 +223,7 @@ def quick_parked_check(url: str) -> Tuple[bool, Optional[str]]:
                 http_url = url.replace("https://", "http://")
                 if not http_url.startswith("http"):
                     http_url = "http://" + url
-                    
+                
                 # IMPORTANT: Set allow_redirects=True to follow redirects
                 response = requests.get(http_url, headers=headers, timeout=5.0, stream=True, allow_redirects=True)
                 
@@ -210,47 +231,65 @@ def quick_parked_check(url: str) -> Tuple[bool, Optional[str]]:
                 if response.history:
                     redirect_chain = " -> ".join([r.url for r in response.history])
                     final_url = response.url
+                    
                     logger.info(f"Followed HTTP redirect chain: {redirect_chain} -> {final_url}")
+                    
+                    # If redirected to a different domain, update for parked check
+                    final_domain = urlparse(final_url).netloc
+                    if final_domain != domain and final_domain.startswith('www.'):
+                        final_domain = final_domain[4:]
+                        
+                    if final_domain != domain:
+                        logger.info(f"Domain redirected from {domain} to {final_domain}")
+                        domain = final_domain
                 
                 # Get a chunk of content
                 content = next(response.iter_content(2048), None)
+                
                 if content:
                     content_str = content.decode('utf-8', errors='ignore')
                     
                     # Check for common parked domain indicators
                     parked_indicators = [
-                        "domain is for sale", "buy this domain", "domain parking", 
-                        "parked by", "godaddy", "domain registration", "hosting provider"
+                        "domain is for sale", "buy this domain", "domain parking",
+                        "parked by", "godaddy", "domain registration", "hosting provider",
+                        "domain has expired", "domain available", "domain not configured",
+                        "website coming soon", "under construction", "future home",
+                        "site temporarily unavailable"
                     ]
                     
                     if any(indicator in content_str.lower() for indicator in parked_indicators):
                         logger.info(f"HTTP quick check found parked domain indicators for {domain}")
                         return True, content_str
-                        
+                    
                     # If not immediately obvious, get more content
                     full_content = content_str
+                    
                     try:
                         # Get up to 10KB more
                         for _ in range(5):
                             chunk = next(response.iter_content(2048), None)
                             if not chunk:
                                 break
+                                
                             chunk_str = chunk.decode('utf-8', errors='ignore')
                             full_content += chunk_str
                         
                         from domain_classifier.classifiers.decision_tree import is_parked_domain
+                        
                         if is_parked_domain(full_content, domain):
                             logger.info(f"HTTP quick check determined {domain} is a parked domain")
                             return True, full_content
+                    
                     except Exception as e:
                         logger.warning(f"Error in HTTP additional content check: {e}")
-                        
+                    
                     return False, full_content
+            
             except Exception as http_e:
                 logger.warning(f"HTTP also failed in quick parked check: {http_e}")
-        
-        return False, None
-        
+                return False, None
+    
     except Exception as e:
         logger.warning(f"Quick parked domain check failed: {e}")
         return False, None
@@ -258,18 +297,21 @@ def quick_parked_check(url: str) -> Tuple[bool, Optional[str]]:
 def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]], Optional[str]]:
     """
     Crawl a website using Direct Crawler first, then try Scrapy only if necessary,
-    then Apify as a last resort.
-    
+    then Apify as a last resort. Enhanced with better redirect handling.
+
     Args:
         url (str): The URL to crawl
-        
+
     Returns:
         tuple: (content, (error_type, error_detail), crawler_type)
-            - content: The crawled content or None if failed
-            - error_type: Type of error if failed, None if successful
-            - error_detail: Detailed error message if failed, None if successful
-            - crawler_type: The type of crawler used ("direct", "scrapy", "apify", etc.)
+        - content: The crawled content or None if failed
+        - error_type: Type of error if failed, None if successful
+        - error_detail: Detailed error message if failed, None if successful
+        - crawler_type: The type of crawler used ("direct", "scrapy", "apify", etc.)
     """
+    redirect_chain = []
+    final_url = url
+    
     try:
         logger.info(f"Starting crawl for {url}")
         
@@ -299,13 +341,26 @@ def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optiona
         
         # Try both HTTP and HTTPS with direct crawler first
         from domain_classifier.crawlers.direct_crawler import try_multiple_protocols
-        logger.info(f"Trying multiple protocols for {domain}")
         
+        logger.info(f"Trying multiple protocols for {domain}")
         direct_content, (direct_error_type, direct_error_detail), direct_crawler_type = try_multiple_protocols(domain)
+        
+        # If direct crawler returned redirects, update domain for checks
+        if direct_crawler_type and "redirect" in direct_crawler_type:
+            # Extract final domain after redirects if available
+            if final_url != url:
+                final_domain = urlparse(final_url).netloc
+                if final_domain.startswith('www.'):
+                    final_domain = final_domain[4:]
+                    
+                if final_domain != domain:
+                    logger.info(f"Using redirected domain {final_domain} for checks instead of {domain}")
+                    domain = final_domain
         
         # For minimal content with direct crawler, check if it's a parked domain
         if direct_content and len(direct_content.strip()) <= 300:
             from domain_classifier.classifiers.decision_tree import is_parked_domain
+            
             if is_parked_domain(direct_content, domain):
                 logger.info(f"Detected parked domain from direct crawl content: {domain}")
                 return None, ("is_parked", "Domain appears to be parked based on content analysis"), "direct_parked_domain"
@@ -320,6 +375,7 @@ def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optiona
         # CHANGED: Only try Scrapy if direct crawl was unsuccessful or returned minimal content
         if not direct_content or direct_content_length < 300:
             logger.info(f"Direct crawl got insufficient content ({direct_content_length} chars), trying Scrapy for {url}")
+            
             scrapy_content, (scrapy_error_type, scrapy_error_detail) = scrapy_crawl(url)
             scrapy_content_length = len(scrapy_content.strip()) if scrapy_content else 0
             
@@ -329,8 +385,10 @@ def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optiona
             # Check for parked domain indicators in Scrapy content
             if scrapy_content:
                 from domain_classifier.classifiers.decision_tree import is_parked_domain
+                
                 # Ensure scrapy_content is a string, not a tuple
                 scrapy_content_str = scrapy_content[0] if isinstance(scrapy_content, tuple) else scrapy_content
+                
                 if is_parked_domain(scrapy_content_str, domain):
                     logger.info(f"Detected parked domain from Scrapy content: {domain}")
                     return None, ("is_parked", "Domain appears to be parked based on content analysis"), "scrapy_parked_domain"
@@ -340,12 +398,12 @@ def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optiona
                 logger.info(f"Using Scrapy content: {scrapy_content_length} chars")
                 track_crawler_usage("scrapy_primary")
                 return scrapy_content, (None, None), "scrapy"
-                
+            
             # If direct content is better than Scrapy, use direct content
             if direct_content and direct_content_length > scrapy_content_length:
                 logger.info(f"Using direct content: {direct_content_length} chars")
                 return direct_content, (None, None), direct_crawler_type
-                
+            
             # If Scrapy got any content at all, use it
             if scrapy_content and scrapy_content_length > 0:
                 logger.info(f"Using minimal Scrapy content: {scrapy_content_length} chars")
@@ -359,17 +417,20 @@ def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optiona
         # If both direct and Scrapy failed, try Apify as absolute last resort
         if (not direct_content or direct_content_length < 100) and (not 'scrapy_content' in locals() or not scrapy_content):
             logger.info(f"Both Direct and Scrapy failed for {url}, trying Apify fallback")
+            
             content, (error_type, error_detail) = apify_crawl(url, timeout=40)  # Reduced timeout to speed up processing
             
             # Final check for parked domain with Apify content
             if content:
                 from domain_classifier.classifiers.decision_tree import is_parked_domain
+                
                 # Ensure content is a string, not a tuple
                 content_str = content[0] if isinstance(content, tuple) else content
+                
                 if is_parked_domain(content_str, domain):
                     logger.info(f"Detected parked domain from Apify content: {domain}")
                     return None, ("is_parked", "Domain appears to be parked based on content analysis"), "apify_parked_domain"
-                    
+            
             if content and len(content.strip()) > 100:
                 logger.info(f"Apify crawl successful for {domain}, got {len(content)} characters")
                 track_crawler_usage("apify_last_resort")  # Mark clearly as last resort
@@ -378,22 +439,25 @@ def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optiona
                 logger.info(f"Apify got minimal content for {domain}, using it as last resort")
                 track_crawler_usage("apify_minimal")
                 return content, (None, None), "apify_minimal"
-        else:
-            # Last attempt - try direct HTTP crawl with higher timeout
-            try:
-                http_url = "http://" + domain
-                logger.info(f"Final attempt: HTTP direct crawl with higher timeout for {http_url}")
-                from domain_classifier.crawlers.direct_crawler import direct_crawl
-                # IMPORTANT: Set higher timeout and ensure redirects are followed
-                content, (final_error_type, final_error_detail), final_crawler_type = direct_crawl(http_url, timeout=15.0)
+            else:
+                # Last attempt - try direct HTTP crawl with higher timeout
+                try:
+                    http_url = "http://" + domain
+                    logger.info(f"Final attempt: HTTP direct crawl with higher timeout for {http_url}")
+                    
+                    from domain_classifier.crawlers.direct_crawler import direct_crawl
+                    
+                    # IMPORTANT: Set higher timeout and ensure redirects are followed
+                    content, (final_error_type, final_error_detail), final_crawler_type = direct_crawl(http_url, timeout=15.0)
+                    
+                    if content and len(content.strip()) > 100:
+                        logger.info(f"Final HTTP attempt successful for {domain}")
+                        track_crawler_usage("direct_http_final")
+                        return content, (None, None), "direct_http_final"
                 
-                if content and len(content.strip()) > 100:
-                    logger.info(f"Final HTTP attempt successful for {domain}")
-                    track_crawler_usage("direct_http_final")
-                    return content, (None, None), "direct_http_final"
-            except Exception as final_e:
-                logger.warning(f"Final HTTP attempt failed: {final_e}")
-                
+                except Exception as final_e:
+                    logger.warning(f"Final HTTP attempt failed: {final_e}")
+        
         # If everything failed, return error info from the best source
         error_info = (direct_error_type, direct_error_detail)
         if 'scrapy_error_type' in locals() and scrapy_error_type:
@@ -402,7 +466,7 @@ def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optiona
             error_info = (error_type, error_detail)
             
         return None, error_info, None
-            
+    
     except Exception as e:
         error_type, error_detail = detect_error_type(str(e))
         logger.error(f"Error crawling website: {e} (Type: {error_type})")
@@ -412,16 +476,16 @@ def apify_crawl(url: str, timeout: int = 60) -> Tuple[Optional[str], Tuple[Optio
     """
     Crawl a website using Apify with improved multi-stage approach for JavaScript-heavy sites.
     Enhanced to properly handle redirects.
-    
+
     Args:
         url: The URL to crawl
         timeout: Maximum time to wait for crawl to complete (seconds)
-        
+
     Returns:
         tuple: (content, (error_type, error_detail))
-            - content: The crawled content or None if failed
-            - error_type: Type of error if failed, None if successful
-            - error_detail: Detailed error message if failed, None if successful
+        - content: The crawled content or None if failed
+        - error_type: Type of error if failed, None if successful
+        - error_detail: Detailed error message if failed, None if successful
     """
     try:
         logger.info(f"Starting Apify crawl for {url}")
@@ -434,30 +498,35 @@ def apify_crawl(url: str, timeout: int = 60) -> Tuple[Optional[str], Tuple[Optio
         
         # Start the crawl with standard settings
         endpoint = f"https://api.apify.com/v2/actor-tasks/{APIFY_TASK_ID}/runs?token={APIFY_API_TOKEN}"
+        
         payload = {
             "startUrls": [{"url": url}],
             "maxCrawlingDepth": 1,
             "maxCrawlPages": 5,
             "timeoutSecs": 30,  # Reduced timeout to avoid lengthy processing
             "maxRequestRetries": 3,  # Add retry capability
-            "maxRedirects": 10,    # IMPORTANT: Increase max redirects from default
+            "maxRedirects": 10,  # IMPORTANT: Increase max redirects from default
             "forceResponseEncoding": "utf-8"  # Force UTF-8 encoding for better text extraction
         }
+        
         headers = {"Content-Type": "application/json"}
         
         try:
             response = requests.post(endpoint, json=payload, headers=headers, timeout=15)  # Reduced timeout
             response.raise_for_status()
+            
             run_id = response.json()['data']['id']
             logger.info(f"Successfully started Apify run with ID: {run_id}")
+        
         except Exception as e:
             logger.error(f"Error starting Apify crawl: {e}")
             return None, detect_error_type(str(e))
-            
+        
         # Wait for crawl to complete
         endpoint = f"https://api.apify.com/v2/actor-runs/{run_id}/dataset/items?token={APIFY_API_TOKEN}"
         
         max_attempts = 4  # Reduced attempts to avoid long waits (about 40 seconds max)
+        
         for attempt in range(max_attempts):
             logger.info(f"Checking Apify crawl results, attempt {attempt+1}/{max_attempts}")
             
@@ -470,6 +539,7 @@ def apify_crawl(url: str, timeout: int = 60) -> Tuple[Optional[str], Tuple[Optio
                     if data:
                         # Extract redirect information if available
                         redirected_urls = []
+                        
                         for item in data:
                             if item.get('redirectedFrom') or item.get('redirectedTo'):
                                 redirected_urls.append({
@@ -480,11 +550,26 @@ def apify_crawl(url: str, timeout: int = 60) -> Tuple[Optional[str], Tuple[Optio
                         if redirected_urls:
                             logger.info(f"Apify detected redirects: {redirected_urls}")
                             
+                            # If redirected, update domain for parked domain check
+                            if redirected_urls:
+                                try:
+                                    final_url = redirected_urls[-1]['to']
+                                    final_domain = urlparse(final_url).netloc
+                                    if final_domain.startswith('www.'):
+                                        final_domain = final_domain[4:]
+                                        
+                                    if final_domain != domain:
+                                        logger.info(f"Domain redirected from {domain} to {final_domain}")
+                                        domain = final_domain
+                                except Exception as e:
+                                    logger.warning(f"Error processing redirect: {e}")
+                        
                         combined_text = ' '.join(item.get('text', '') for item in data if item.get('text'))
                         
                         # Check if this is a parked domain before continuing
                         if combined_text:
                             from domain_classifier.classifiers.decision_tree import is_parked_domain
+                            
                             if is_parked_domain(combined_text, domain):
                                 logger.info(f"Detected parked domain during Apify crawl: {domain}")
                                 return None, ("is_parked", "Domain appears to be parked based on content analysis")
@@ -497,8 +582,10 @@ def apify_crawl(url: str, timeout: int = 60) -> Tuple[Optional[str], Tuple[Optio
                             # Continue trying, might get better results on next attempt
                 else:
                     logger.warning(f"Received status code {response.status_code} when checking Apify crawl results")
+            
             except requests.exceptions.Timeout:
                 logger.warning(f"Timeout when checking Apify status (attempt {attempt+1})")
+            
             except Exception as e:
                 logger.warning(f"Error checking Apify status: {e}")
             
@@ -507,26 +594,31 @@ def apify_crawl(url: str, timeout: int = 60) -> Tuple[Optional[str], Tuple[Optio
                 time.sleep(5)
             else:
                 time.sleep(10)
+        
+        # After 3 attempts, try a different approach (around 30 seconds in)
+        if attempt == 3:
+            logger.info(f"Trying Puppeteer-based approach for JavaScript-heavy site...")
+            
+            try:
+                # Try puppeteer-based approach
+                puppeteer_url = f"https://api.apify.com/v2/actor-runs/{run_id}/?token={APIFY_API_TOKEN}"
                 
-            # After 3 attempts, try a different approach (around 30 seconds in)
-            if attempt == 3:
-                logger.info(f"Trying Puppeteer-based approach for JavaScript-heavy site...")
-                try:
-                    # Try puppeteer-based approach
-                    puppeteer_url = f"https://api.apify.com/v2/actor-runs/{run_id}/?token={APIFY_API_TOKEN}"
-                    response = requests.post(puppeteer_url, timeout=10)
-                    
-                    if response.status_code == 200:
-                        logger.info("Puppeteer request successful, continuing with checks")
-                    else:
-                        logger.error(f"Error with Puppeteer approach: {response.status_code} {response.reason} for url: {puppeteer_url}")
-                except Exception as puppeteer_error:
-                    logger.error(f"Error with Puppeteer approach: {puppeteer_error}")
+                response = requests.post(puppeteer_url, timeout=10)
+                
+                if response.status_code == 200:
+                    logger.info("Puppeteer request successful, continuing with checks")
+                else:
+                    logger.error(f"Error with Puppeteer approach: {response.status_code} {response.reason} for url: {puppeteer_url}")
+            
+            except Exception as puppeteer_error:
+                logger.error(f"Error with Puppeteer approach: {puppeteer_error}")
         
         # If we've reached half our attempts, try direct request
         # This happens around 30-40 seconds in
         logger.info(f"Trying direct request fallback...")
+        
         from domain_classifier.crawlers.direct_crawler import direct_crawl
+        
         # IMPORTANT: Use higher timeout and ensure redirects are followed
         direct_content, (error_type, error_detail), crawler_type = direct_crawl(url, timeout=15.0)
         
@@ -535,13 +627,14 @@ def apify_crawl(url: str, timeout: int = 60) -> Tuple[Optional[str], Tuple[Optio
             logger.info(f"Direct request fallback got {len(direct_content)} characters")
             track_crawler_usage("direct_fallback_from_apify")
             return direct_content, (None, None)
-                
+        
         # Critical Fix: Try HTTP version explicitly
         http_url = url.replace('https://', 'http://')
         if not http_url.startswith('http'):
             http_url = 'http://' + url
             
         logger.info(f"Trying final HTTP direct crawl for {http_url}")
+        
         # IMPORTANT: Use higher timeout and ensure redirects are followed
         direct_content, (error_type, error_detail), crawler_type = direct_crawl(http_url, timeout=15.0)
         
@@ -554,6 +647,7 @@ def apify_crawl(url: str, timeout: int = 60) -> Tuple[Optional[str], Tuple[Optio
         # If we get to this point, we've tried everything
         logger.warning(f"Crawl timed out after all attempts")
         return None, ("timeout", "The website took too long to respond or has minimal crawlable content.")
+    
     except Exception as e:
         error_type, error_detail = detect_error_type(str(e))
         logger.error(f"Error crawling with Apify: {e} (Type: {error_type})")
