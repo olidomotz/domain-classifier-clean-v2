@@ -17,6 +17,7 @@ from typing import Dict, Any, Optional, Tuple
 from urllib.parse import urlparse
 import importlib
 import inspect
+from functools import wraps
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -42,6 +43,9 @@ def apply_patches():
     
     # Step 6: Set up monitoring
     setup_enhanced_monitoring()
+    
+    # Step 7: Add request interceptor for DNS errors
+    add_dns_error_interceptor()
     
     logger.info("All patches successfully applied")
 
@@ -195,97 +199,272 @@ def fix_dns_error_detection():
         # Apply the patch
         error_handling.create_error_result = enhanced_create_error_result
         
-        # Patch enrich.py to stop processing for DNS errors
-        try:
-            from domain_classifier.api.routes import enrich
-            
-            # Store original function
-            original_classify_and_enrich = enrich.classify_and_enrich
-            
-            def patched_classify_and_enrich():
-                """Patched version that properly handles DNS errors."""
-                # Check if this is a POST request
-                from flask import request
-                if request.method != 'POST':
-                    return original_classify_and_enrich()
-                    
-                try:
-                    # Extract data from request
-                    data = request.json
-                    input_value = data.get('url', '').strip()
-                    
-                    if not input_value:
-                        return original_classify_and_enrich()
-                        
-                    # Determine if input is an email
-                    is_email = '@' in input_value
-                    email = input_value if is_email else None
-                    
-                    # Extract domain
-                    domain = None
-                    if is_email:
-                        from domain_classifier.utils.domain_utils import extract_domain_from_email
-                        domain = extract_domain_from_email(input_value)
-                    else:
-                        from domain_classifier.utils.domain_utils import normalize_domain
-                        domain = normalize_domain(input_value)
-                        
-                    if not domain:
-                        return original_classify_and_enrich()
-                        
-                    # Create URL for checking
-                    url = f"https://{domain}"
-                    
-                    # Check for DNS resolution
-                    from domain_classifier.utils.error_handling import is_domain_worth_crawling
-                    worth_crawling, has_dns, error_msg, potentially_flaky = is_domain_worth_crawling(domain)
-                    
-                    # For DNS errors, create a response and return immediately
-                    if not has_dns and (error_msg == "dns_error" or "dns" in str(error_msg).lower()):
-                        logger.info(f"DNS error detected for {domain}, returning DNS error response")
-                        
-                        from domain_classifier.utils.error_handling import create_error_result
-                        error_result = create_error_result(
-                            domain,
-                            "dns_error",
-                            error_msg if error_msg != "dns_error" else None,
-                            email,
-                            "early_check"
-                        )
-                        
-                        error_result["website_url"] = url
-                        error_result["final_classification"] = "7-No Website available"
-                        error_result["predicted_class"] = "DNS Error"
-                        
-                        # Format the response
-                        try:
-                            from domain_classifier.utils.api_formatter import format_api_response
-                            from flask import jsonify
-                            formatted_result = format_api_response(error_result)
-                            return jsonify(formatted_result), 200
-                        except Exception as format_error:
-                            logger.error(f"Error formatting DNS error response: {format_error}")
-                            from flask import jsonify
-                            return jsonify(error_result), 200
-                    
-                    # For all other cases, use the original function
-                    return original_classify_and_enrich()
-                    
-                except Exception as e:
-                    logger.error(f"Error in patched classify_and_enrich: {e}")
-                    return original_classify_and_enrich()
-            
-            # Apply the patch
-            enrich.classify_and_enrich = patched_classify_and_enrich
-            logger.info("✅ Applied DNS error handling fix to classify_and_enrich function")
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to patch enrich.py for DNS error handling: {e}")
-        
         logger.info("✅ Applied DNS error detection fixes to error_handling.py")
         
     except Exception as e:
         logger.error(f"❌ Failed to fix DNS error detection: {e}")
+
+def add_dns_error_interceptor():
+    """Add a DNS error interceptor at the Flask level to catch DNS errors early."""
+    try:
+        # Use Flask request processing to catch DNS errors
+        import flask
+        from flask import request, jsonify
+        
+        # Create a decorator that can be applied to route handlers
+        def dns_error_handler(app):
+            @app.before_request
+            def check_dns_before_request():
+                # Only intercept POST requests to /classify-and-enrich
+                if request.method == 'POST' and request.path == '/classify-and-enrich':
+                    try:
+                        # Extract data from request
+                        data = request.json
+                        if not data:
+                            return None
+                            
+                        input_value = data.get('url', '').strip()
+                        if not input_value:
+                            return None
+                            
+                        # Determine if input is an email
+                        is_email = '@' in input_value
+                        email = input_value if is_email else None
+                        
+                        # Extract domain
+                        domain = None
+                        if is_email:
+                            from domain_classifier.utils.domain_utils import extract_domain_from_email
+                            domain = extract_domain_from_email(input_value)
+                        else:
+                            from domain_classifier.utils.domain_utils import normalize_domain
+                            domain = normalize_domain(input_value)
+                            
+                        if not domain:
+                            return None
+                            
+                        # Create URL for checking
+                        url = f"https://{domain}"
+                        
+                        # Check for DNS resolution
+                        from domain_classifier.utils.error_handling import is_domain_worth_crawling
+                        worth_crawling, has_dns, error_msg, potentially_flaky = is_domain_worth_crawling(domain)
+                        
+                        # For DNS errors, create a response and return immediately
+                        if not has_dns and (error_msg == "dns_error" or "dns" in str(error_msg).lower()):
+                            logger.info(f"DNS error detected for {domain}, returning DNS error response")
+                            
+                            from domain_classifier.utils.error_handling import create_error_result
+                            error_result = create_error_result(
+                                domain,
+                                "dns_error",
+                                error_msg if error_msg != "dns_error" else None,
+                                email,
+                                "early_check"
+                            )
+                            
+                            error_result["website_url"] = url
+                            error_result["final_classification"] = "7-No Website available"
+                            error_result["predicted_class"] = "DNS Error"
+                            
+                            # Format the response
+                            try:
+                                from domain_classifier.utils.api_formatter import format_api_response
+                                formatted_result = format_api_response(error_result)
+                                return jsonify(formatted_result), 200
+                            except Exception as format_error:
+                                logger.error(f"Error formatting DNS error response: {format_error}")
+                                return jsonify(error_result), 200
+                    
+                    except Exception as e:
+                        logger.error(f"Error in DNS error handler: {e}")
+                
+                # For all other cases, proceed with normal request handling
+                return None
+        
+        # Try different methods to patch the app
+        try:
+            # Method 1: Direct import of app
+            try:
+                from domain_classifier.api.app import app
+                dns_error_handler(app)
+                logger.info("✅ Applied DNS error interceptor to app directly")
+                return
+            except (ImportError, AttributeError) as e:
+                logger.warning(f"Could not apply DNS interceptor directly to app: {e}")
+            
+            # Method 2: Patch the app factory
+            try:
+                from domain_classifier.api.app import create_app as original_create_app
+                
+                @wraps(original_create_app)
+                def patched_create_app(*args, **kwargs):
+                    app = original_create_app(*args, **kwargs)
+                    dns_error_handler(app)
+                    logger.info("✅ Applied DNS error interceptor via app factory")
+                    return app
+                
+                # Replace the create_app function
+                sys.modules['domain_classifier.api.app'].create_app = patched_create_app
+                logger.info("✅ Patched create_app to add DNS error interceptor")
+                return
+            except (ImportError, AttributeError) as e:
+                logger.warning(f"Could not patch create_app: {e}")
+            
+            # Method 3: Monkey patch Flask itself
+            try:
+                original_full_dispatch_request = flask.Flask.full_dispatch_request
+                
+                def patched_full_dispatch_request(self):
+                    if request.method == 'POST' and request.path == '/classify-and-enrich':
+                        try:
+                            # Extract data from request
+                            data = request.json
+                            if data:
+                                input_value = data.get('url', '').strip()
+                                if input_value:
+                                    # Determine if input is an email
+                                    is_email = '@' in input_value
+                                    email = input_value if is_email else None
+                                    
+                                    # Extract domain
+                                    domain = None
+                                    if is_email:
+                                        from domain_classifier.utils.domain_utils import extract_domain_from_email
+                                        domain = extract_domain_from_email(input_value)
+                                    else:
+                                        from domain_classifier.utils.domain_utils import normalize_domain
+                                        domain = normalize_domain(input_value)
+                                        
+                                    if domain:
+                                        # Create URL for checking
+                                        url = f"https://{domain}"
+                                        
+                                        # Check for DNS resolution
+                                        from domain_classifier.utils.error_handling import is_domain_worth_crawling
+                                        worth_crawling, has_dns, error_msg, potentially_flaky = is_domain_worth_crawling(domain)
+                                        
+                                        # For DNS errors, create a response and return immediately
+                                        if not has_dns and (error_msg == "dns_error" or "dns" in str(error_msg).lower()):
+                                            logger.info(f"DNS error detected for {domain}, returning DNS error response")
+                                            
+                                            from domain_classifier.utils.error_handling import create_error_result
+                                            error_result = create_error_result(
+                                                domain,
+                                                "dns_error",
+                                                error_msg if error_msg != "dns_error" else None,
+                                                email,
+                                                "early_check"
+                                            )
+                                            
+                                            error_result["website_url"] = url
+                                            error_result["final_classification"] = "7-No Website available"
+                                            error_result["predicted_class"] = "DNS Error"
+                                            
+                                            # Format the response
+                                            try:
+                                                from domain_classifier.utils.api_formatter import format_api_response
+                                                formatted_result = format_api_response(error_result)
+                                                return jsonify(formatted_result)
+                                            except Exception as format_error:
+                                                logger.error(f"Error formatting DNS error response: {format_error}")
+                                                return jsonify(error_result)
+                        except Exception as e:
+                            logger.error(f"Error in patched Flask dispatch: {e}")
+                    
+                    # For all other cases, proceed with normal request handling
+                    return original_full_dispatch_request(self)
+                
+                # Apply the patch
+                flask.Flask.full_dispatch_request = patched_full_dispatch_request
+                logger.info("✅ Applied global Flask request handler patch for DNS errors")
+                return
+            except Exception as flask_error:
+                logger.warning(f"Could not patch Flask request dispatch: {flask_error}")
+            
+            # Method 4: Try to find and patch specific routes
+            try:
+                # Find all route modules
+                from domain_classifier.api.routes import enrich
+                
+                # Try to find the classify_and_enrich function
+                for name, obj in inspect.getmembers(enrich):
+                    if inspect.isfunction(obj) and ('classify' in name.lower() or 'enrich' in name.lower()):
+                        original_func = obj
+                        
+                        @wraps(original_func)
+                        def patched_function(*args, **kwargs):
+                            # Check for DNS issues first
+                            if request.method == 'POST':
+                                try:
+                                    # Extract data from request
+                                    data = request.json
+                                    if data:
+                                        input_value = data.get('url', '').strip()
+                                        if input_value:
+                                            # Process as before...
+                                            is_email = '@' in input_value
+                                            email = input_value if is_email else None
+                                            
+                                            # Extract domain
+                                            domain = None
+                                            if is_email:
+                                                from domain_classifier.utils.domain_utils import extract_domain_from_email
+                                                domain = extract_domain_from_email(input_value)
+                                            else:
+                                                from domain_classifier.utils.domain_utils import normalize_domain
+                                                domain = normalize_domain(input_value)
+                                                
+                                            if domain:
+                                                # Check DNS
+                                                from domain_classifier.utils.error_handling import is_domain_worth_crawling
+                                                worth_crawling, has_dns, error_msg, potentially_flaky = is_domain_worth_crawling(domain)
+                                                
+                                                if not has_dns and (error_msg == "dns_error" or "dns" in str(error_msg).lower()):
+                                                    # Return error response
+                                                    logger.info(f"DNS error detected in patched route function for {domain}")
+                                                    
+                                                    from domain_classifier.utils.error_handling import create_error_result
+                                                    error_result = create_error_result(
+                                                        domain,
+                                                        "dns_error",
+                                                        error_msg if error_msg != "dns_error" else None,
+                                                        email,
+                                                        "early_check"
+                                                    )
+                                                    
+                                                    error_result["website_url"] = f"https://{domain}"
+                                                    error_result["final_classification"] = "7-No Website available"
+                                                    error_result["predicted_class"] = "DNS Error"
+                                                    
+                                                    # Format the response
+                                                    try:
+                                                        from domain_classifier.utils.api_formatter import format_api_response
+                                                        formatted_result = format_api_response(error_result)
+                                                        return jsonify(formatted_result), 200
+                                                    except Exception as format_error:
+                                                        logger.error(f"Error formatting DNS error response: {format_error}")
+                                                        return jsonify(error_result), 200
+                                except Exception as e:
+                                    logger.error(f"Error in patched route function: {e}")
+                            
+                            # Otherwise, proceed with original function
+                            return original_func(*args, **kwargs)
+                        
+                        # Apply the patch
+                        setattr(enrich, name, patched_function)
+                        logger.info(f"✅ Applied DNS error handling to route function: {name}")
+                        return
+                
+                logger.warning("Could not find appropriate route function to patch")
+            except Exception as route_error:
+                logger.warning(f"Could not patch route functions: {route_error}")
+                
+        except Exception as e:
+            logger.error(f"Failed to apply any DNS error interceptor method: {e}")
+            
+    except Exception as e:
+        logger.error(f"❌ Failed to add DNS error interceptor: {e}")
 
 def fix_parked_domain_detection():
     """Fix parked domain detection to catch more cases like crapanzano.net."""
@@ -396,93 +575,97 @@ def fix_apollo_data_classification():
                                                 apollo_data: Optional[Dict] = None,
                                                 apollo_person_data: Optional[Dict] = None) -> str:
             """Enhanced description generation that uses Apollo data for classification when web content is unavailable."""
-            # Domain name for logging
-            domain = classification.get("domain", "unknown")
-            
-            # Handle DNS error cases
-            if classification.get("error_type") == "dns_error" or classification.get("is_dns_error") == True:
-                logger.info(f"DNS error detected in generate_detailed_description for {domain}")
+            try:
+                # Domain name for logging
+                domain = classification.get("domain", "unknown")
                 
-                # Set proper final classification
-                classification["final_classification"] = "7-No Website available"
-                classification["predicted_class"] = "DNS Error"
+                # Handle DNS error cases
+                if classification.get("error_type") == "dns_error" or classification.get("is_dns_error") == True:
+                    logger.info(f"DNS error detected in generate_detailed_description for {domain}")
+                    
+                    # Set proper final classification
+                    classification["final_classification"] = "7-No Website available"
+                    classification["predicted_class"] = "DNS Error"
+                    
+                    return f"The domain {domain} could not be resolved. It may not exist or its DNS records may be misconfigured."
                 
-                return f"The domain {domain} could not be resolved. It may not exist or its DNS records may be misconfigured."
-            
-            # Handle Process Did Not Complete but with Apollo data
-            if classification.get("predicted_class") == "Process Did Not Complete" and apollo_data:
-                # Get description from Apollo
-                description = None
-                for field in ["short_description", "description", "long_description"]:
-                    if apollo_data.get(field):
-                        description = apollo_data.get(field)
-                        logger.info(f"Found Apollo {field} for {domain}")
-                        break
+                # Handle Process Did Not Complete but with Apollo data
+                if classification.get("predicted_class") == "Process Did Not Complete" and apollo_data:
+                    # Get description from Apollo
+                    description = None
+                    for field in ["short_description", "description", "long_description"]:
+                        if apollo_data.get(field):
+                            description = apollo_data.get(field)
+                            logger.info(f"Found Apollo {field} for {domain}")
+                            break
+                    
+                    if description:
+                        # Try to classify using the description
+                        try:
+                            # Import LLM classifier
+                            from domain_classifier.classifiers.llm_classifier import LLMClassifier
+                            
+                            # Get API key
+                            import os
+                            api_key = os.environ.get("ANTHROPIC_API_KEY")
+                            
+                            if api_key:
+                                # Create classifier
+                                classifier = LLMClassifier(api_key=api_key)
+                                
+                                # Create classification text
+                                classification_text = f"Domain: {domain}\n\n"
+                                classification_text += f"Company Description from Apollo: {description}\n\n"
+                                
+                                if apollo_data.get("industry"):
+                                    classification_text += f"Industry: {apollo_data['industry']}\n"
+                                    
+                                if apollo_data.get("employee_count"):
+                                    classification_text += f"Employee Count: {apollo_data['employee_count']}\n"
+                                
+                                # Run classification on Apollo description
+                                logger.info(f"Attempting to classify {domain} using Apollo data")
+                                classification_attempt = classifier.classify(
+                                    content=classification_text,
+                                    domain=domain
+                                )
+                                
+                                if classification_attempt and classification_attempt.get("predicted_class"):
+                                    logger.info(f"Successfully classified {domain} as {classification_attempt.get('predicted_class')} using Apollo data")
+                                    
+                                    # Update the classification with Apollo-based classification
+                                    classification["predicted_class"] = classification_attempt.get("predicted_class")
+                                    classification["detection_method"] = "apollo_data_classification"
+                                    classification["source"] = "apollo_data"
+                                    
+                                    # Update confidence scores if available
+                                    if "confidence_scores" in classification_attempt:
+                                        classification["confidence_scores"] = classification_attempt.get("confidence_scores")
+                                    
+                                    # Set is_service_business based on the classification
+                                    classification["is_service_business"] = classification["predicted_class"] in [
+                                        "Managed Service Provider",
+                                        "Integrator - Commercial A/V",
+                                        "Integrator - Residential A/V"
+                                    ]
+                                    
+                                    # Set final_classification based on the new predicted_class
+                                    from domain_classifier.utils.final_classification import determine_final_classification
+                                    classification["final_classification"] = determine_final_classification(classification)
+                                    
+                                    # Use the Apollo description as the company description
+                                    classification["company_description"] = description
+                                    
+                                    # Add a note about using Apollo data
+                                    return f"{description}\n\nNote: This description is based on Apollo data as the website could not be analyzed."
+                        except Exception as e:
+                            logger.error(f"Error classifying with Apollo data: {e}")
                 
-                if description:
-                    # Try to classify using the description
-                    try:
-                        # Import LLM classifier
-                        from domain_classifier.classifiers.llm_classifier import LLMClassifier
-                        
-                        # Get API key
-                        import os
-                        api_key = os.environ.get("ANTHROPIC_API_KEY")
-                        
-                        if api_key:
-                            # Create classifier
-                            classifier = LLMClassifier(api_key=api_key)
-                            
-                            # Create classification text
-                            classification_text = f"Domain: {domain}\n\n"
-                            classification_text += f"Company Description from Apollo: {description}\n\n"
-                            
-                            if apollo_data.get("industry"):
-                                classification_text += f"Industry: {apollo_data['industry']}\n"
-                                
-                            if apollo_data.get("employee_count"):
-                                classification_text += f"Employee Count: {apollo_data['employee_count']}\n"
-                            
-                            # Run classification on Apollo description
-                            logger.info(f"Attempting to classify {domain} using Apollo data")
-                            classification_attempt = classifier.classify(
-                                content=classification_text,
-                                domain=domain
-                            )
-                            
-                            if classification_attempt and classification_attempt.get("predicted_class"):
-                                logger.info(f"Successfully classified {domain} as {classification_attempt.get('predicted_class')} using Apollo data")
-                                
-                                # Update the classification with Apollo-based classification
-                                classification["predicted_class"] = classification_attempt.get("predicted_class")
-                                classification["detection_method"] = "apollo_data_classification"
-                                classification["source"] = "apollo_data"
-                                
-                                # Update confidence scores if available
-                                if "confidence_scores" in classification_attempt:
-                                    classification["confidence_scores"] = classification_attempt.get("confidence_scores")
-                                
-                                # Set is_service_business based on the classification
-                                classification["is_service_business"] = classification["predicted_class"] in [
-                                    "Managed Service Provider",
-                                    "Integrator - Commercial A/V",
-                                    "Integrator - Residential A/V"
-                                ]
-                                
-                                # Set final_classification based on the new predicted_class
-                                from domain_classifier.utils.final_classification import determine_final_classification
-                                classification["final_classification"] = determine_final_classification(classification)
-                                
-                                # Use the Apollo description as the company description
-                                classification["company_description"] = description
-                                
-                                # Add a note about using Apollo data
-                                return f"{description}\n\nNote: This description is based on Apollo data as the website could not be analyzed."
-                    except Exception as e:
-                        logger.error(f"Error classifying with Apollo data: {e}")
-            
-            # For all other cases, use the original function
-            return original_generate_detailed_description(classification, apollo_data, apollo_person_data)
+                # For all other cases, use the original function
+                return original_generate_detailed_description(classification, apollo_data, apollo_person_data)
+            except Exception as e:
+                logger.error(f"Error in enhanced_generate_detailed_description: {e}")
+                return original_generate_detailed_description(classification, apollo_data, apollo_person_data)
         
         # Apply the patch
         description_enhancer.generate_detailed_description = enhanced_generate_detailed_description
@@ -518,13 +701,19 @@ def fix_timeout_issues():
                     logger.warning(f"Domain {domain} does not resolve - DNS error")
                     return None, ("dns_error", "This domain does not exist or cannot be resolved"), None
                 
+                # Perform a quick check for parked domains before full crawl
+                is_parked, quick_content = apify_crawler.quick_parked_check(url)
+                if is_parked:
+                    logger.info(f"Quick check identified {domain} as a parked domain")
+                    return None, ("is_parked", "Domain appears to be parked based on quick check"), "quick_check_parked"
+                
                 # Variables to track direct crawl results
                 direct_content = None
                 direct_error_type = None
                 direct_error_detail = None
                 direct_crawler_type = None
                 
-                # Try direct crawler first
+                # Try both HTTP and HTTPS with direct crawler first
                 from domain_classifier.crawlers.direct_crawler import try_multiple_protocols
                 
                 logger.info(f"Trying multiple protocols for {domain}")
@@ -995,3 +1184,14 @@ def setup_enhanced_monitoring():
             
     except Exception as e:
         logger.error(f"❌ Error setting up enhanced monitoring: {e}")
+
+# Run the patches if this module is executed directly
+if __name__ == "__main__":
+    # Configure basic logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    # Apply all patches
+    apply_patches()
