@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 def determine_final_classification(result: Dict[str, Any]) -> str:
     """
     Determine the final classification based on the classification result.
+    Clear hierarchy with proper handling of DNS errors and Process Did Not Complete.
 
     Args:
         result: The classification result
