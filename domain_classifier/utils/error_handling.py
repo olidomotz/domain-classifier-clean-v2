@@ -6,6 +6,7 @@ import requests
 from requests.exceptions import RequestException, Timeout, ConnectionError
 from typing import Dict, Any, Tuple, Optional
 from urllib.parse import urlparse
+import re
 
 # Import final classification utility (if we can - use try/except to avoid circular imports)
 try:
@@ -87,6 +88,8 @@ def check_domain_dns(domain: str) -> Tuple[bool, Optional[str], bool]:
     """
     Check if a domain has valid DNS resolution AND can respond to a basic HTTP request.
     Also detects potentially flaky sites that may fail during crawling.
+    
+    Enhanced to better detect non-existent domains and invalid TLDs.
 
     Args:
         domain (str): The domain to check
@@ -107,11 +110,29 @@ def check_domain_dns(domain: str) -> Tuple[bool, Optional[str], bool]:
         if '/' in clean_domain:
             clean_domain = clean_domain.split('/', 1)[0]
             
-        # Step 1: Try to resolve the domain using socket
+        # Check if TLD is valid - very basic check for common TLDs
+        valid_tlds = ['.com', '.net', '.org', '.io', '.co', '.edu', '.gov', '.info', '.biz', 
+                     '.ai', '.app', '.dev', '.me', '.tech', '.us', '.uk', '.ca', '.au', '.de', 
+                     '.fr', '.jp', '.cn', '.ru', '.br', '.it', '.nl', '.es', '.sg', '.in']
+        
+        domain_parts = clean_domain.split('.')
+        if len(domain_parts) > 1:
+            tld = f".{domain_parts[-1].lower()}"
+            if tld not in valid_tlds:
+                logger.warning(f"Domain {clean_domain} has an unusual TLD: {tld}")
+                # Continue to DNS check - don't return early
+        
+        # Step 1: Try to resolve the domain using socket with more detailed error handling
         try:
             logger.info(f"Checking DNS resolution for domain: {clean_domain}")
             socket.setdefaulttimeout(3.0)  # 3 seconds max
-            ip_address = socket.gethostbyname(clean_domain)
+            
+            # Try getaddrinfo for a more thorough check
+            addr_info = socket.getaddrinfo(clean_domain, None)
+            
+            # Extract IP from the first result
+            ip_address = addr_info[0][4][0] if addr_info else None
+            
             logger.info(f"DNS resolution successful for domain: {clean_domain} (IP: {ip_address})")
             
             # Step 2: Try to establish a reliable HTTP connection
@@ -280,9 +301,28 @@ def check_domain_dns(domain: str) -> Tuple[bool, Optional[str], bool]:
                 return False, f"The domain {domain} resolves but cannot be connected to. The server might be down or blocking connections.", potentially_flaky
                 
         except socket.gaierror as e:
-            logger.warning(f"DNS resolution failed for {domain}: {e}")
-            return False, f"The domain {domain} could not be resolved. It may not exist or DNS records may be misconfigured.", False
+            # Detailed error handling for different DNS error codes
+            error_code = getattr(e, 'errno', None)
+            error_str = str(e).lower()
             
+            # Common DNS error codes:
+            # -2: Name or service not known (domain doesn't exist)
+            # -3: Temporary name resolution failure
+            # -5: No address associated with hostname
+            
+            if error_code == -2 or "name or service not known" in error_str:
+                logger.warning(f"Domain {clean_domain} does not exist (Name not known)")
+                return False, f"The domain {domain} could not be resolved. It may not exist or DNS records may be misconfigured.", False
+            elif error_code == -3 or "temporary failure in name resolution" in error_str:
+                logger.warning(f"Domain {clean_domain} has temporary DNS issues")
+                return False, f"Temporary DNS resolution failure for {domain}. Please try again later.", True
+            elif error_code == -5 or "no address associated" in error_str:
+                logger.warning(f"Domain {clean_domain} has no DNS records")
+                return False, f"The domain {domain} has no DNS A records.", False
+            else:
+                logger.warning(f"DNS resolution failed for {domain}: {e}")
+                return False, f"The domain {domain} could not be resolved. It may not exist or DNS records may be misconfigured.", False
+                
         except socket.timeout as e:
             logger.warning(f"DNS resolution timed out for {domain}: {e}")
             return False, f"Timed out while checking {domain}. Domain may not exist or the server is not responding.", False
