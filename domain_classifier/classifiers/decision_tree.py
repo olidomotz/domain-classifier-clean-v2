@@ -9,13 +9,10 @@ logger = logging.getLogger(__name__)
 
 def is_parked_domain(content: str, domain: str = None) -> bool:
     """
-    Enhanced detection of truly parked domains vs. just having minimal content.
-    Better detection for GoDaddy parked domains and proxy errors.
-
+    Fixed parked domain detection with better balance between detection and false positives.
     Args:
         content: The website content
         domain: Optional domain name for additional checks
-
     Returns:
         bool: True if the domain is parked/inactive
     """
@@ -25,172 +22,73 @@ def is_parked_domain(content: str, domain: str = None) -> bool:
         
     content_lower = content.lower()
     
-    # 1. Direct explicit parking phrases (strongest indicators)
-    explicit_parking_phrases = [
-        "domain is for sale", "buy this domain", "purchasing this domain",
-        "domain may be for sale", "this domain is for sale", "parked by",
-        "domain parking", "this web page is parked", "domain for sale",
-        "this website is for sale", "domain name parking",
-        "purchase this domain", "domain has expired", "domain available",
-        "domain not configured", "inquire about this domain", 
-        "this domain is available for purchase", "domain has been registered",
-        "domain has expired", "reserve this domain name", "bid on this domain"
+    # 1. Check for DEFINITIVE parking indicators (highest confidence)
+    definitive_indicators = [
+        "domain is for sale", "buy this domain", "domain parking",
+        "this domain is for sale", "parked by", "domain broker",
+        "inquire about this domain", "this domain is available for purchase",
+        "bid on this domain"
     ]
     
-    # 2. Expanded list of hosting providers and registrars
-    hosting_providers = [
-        "godaddy", "hostgator", "bluehost", "namecheap", "dreamhost",
+    for indicator in definitive_indicators:
+        if indicator in content_lower:
+            logger.info(f"Domain contains definitive parking indicator: '{indicator}'")
+            return True
+    
+    # 2. Check for combinations of parking-related indicators
+    parking_phrases = [
+        "domain may be for sale", "domain for sale", "domain name parking",
+        "purchase this domain", "domain has expired", "domain available"
+    ]
+    
+    hosting_mentions = [
+        "godaddy", "namecheap", "domain.com", "namesilo", "porkbun",
         "domain registration", "web hosting service", "hosting provider",
-        "register this domain", "domain broker", "proxy error", "error connecting",
-        "domain has expired", "domain has been registered", "courtesy page",
-        "ionos", "domain.com", "hover", "namesilo", "porkbun", 
-        "network solutions", "register.com", "name.com", "enom", 
-        "dynadot", "hover", "domainking", "domainmonster", "1and1", 
-        "1&1", "ionos", "registrar", "dominio", "parkingcrew",
-        "sedo", "bodis", "parked.com", "parking.com"
+        "register this domain", "parkingcrew", "sedo", "bodis", "parked.com"
     ]
     
-    # 3. Technical issues phrases that often appear on parked domains or error pages
-    technical_phrases = [
-        "proxy error", "error connecting", "connection error", "courtesy page",
-        "site not found", "domain not configured", "default web page",
-        "website coming soon", "under construction", "future home of",
-        "site temporarily unavailable", "domain has been registered",
-        "refused to connect", "connection refused", "this page isn't working",
-        "error 403", "error 404", "forbidden", "access denied", 
-        "default page", "server configuration", "web server at", 
-        "webserver at", "website is unavailable", "site is unavailable",
-        "this site can't be reached", "server IP address could not be found"
-    ]
+    parking_count = sum(1 for phrase in parking_phrases if phrase in content_lower)
+    hosting_count = sum(1 for phrase in hosting_mentions if phrase in content_lower)
     
-    # Count explicit parking phrases
-    explicit_matches = 0
-    matched_phrases = []
-    
-    for phrase in explicit_parking_phrases:
-        if phrase in content_lower:
-            explicit_matches += 1
-            matched_phrases.append(phrase)
-    
-    # If we have 1 or more explicit parking indicators, check for additional evidence
-    if explicit_matches >= 1:
-        logger.info(f"Domain contains {explicit_matches} explicit parking phrases ({', '.join(matched_phrases)})")
-        
-        # Check for hosting providers
-        hosting_matches = sum(1 for phrase in hosting_providers if phrase in content_lower)
-        if hosting_matches >= 1:
-            logger.info(f"Domain contains explicit parking phrase and hosting provider reference, considering as parked")
-            return True
-            
-        # Check for technical issues phrases
-        tech_matches = sum(1 for phrase in technical_phrases if phrase in content_lower)
-        if tech_matches >= 1:
-            logger.info(f"Domain contains explicit parking phrase and technical issues, considering as parked")
-            return True
-            
-        # If only one explicit phrase but it's a strong indicator
-        strong_indicators = ["domain is for sale", "buy this domain", "this domain is for sale", "parked by"]
-        if any(indicator in matched_phrases for indicator in strong_indicators):
-            logger.info(f"Domain contains strong parking phrase indicator, considering as parked")
-            return True
-    
-    # 4. Check for common hosting/registrar parking indicators with additional validation
-    hosting_matches = 0
-    hosting_matched_phrases = []
-    
-    for phrase in hosting_providers:
-        if phrase in content_lower:
-            hosting_matches += 1
-            hosting_matched_phrases.append(phrase)
-    
-    # Check for technical issues too
-    tech_matches = sum(1 for phrase in technical_phrases if phrase in content_lower)
-    
-    # If we have multiple hosting phrases or hosting + technical issues, likely parked
-    if (hosting_matches >= 2) or (hosting_matches >= 1 and tech_matches >= 1):
-        logger.info(f"Domain contains hosting/registrar phrases and technical issues, considering as parked")
+    # Require stronger evidence - multiple indicators or specific combinations
+    if parking_count >= 2 or (parking_count >= 1 and hosting_count >= 1):
+        logger.info(f"Domain has multiple parking indicators: {parking_count} parking phrases, {hosting_count} hosting mentions")
         return True
     
-    # 5. Special check for proxy errors with GoDaddy mentions
-    if "proxy error" in content_lower and any(provider in content_lower for provider in ["godaddy", "domain", "hosting"]):
-        logger.info(f"Found proxy error with hosting service mentions, likely parked")
-        return True
-        
-    # 6. Special check for connection refused with common error patterns
-    if ("connection refused" in content_lower or "refused to connect" in content_lower) and len(content.strip()) < 600:
-        logger.info(f"Found connection refused error, likely parked or inactive")
+    # 3. Special case for GoDaddy proxy errors - but with stricter requirements
+    if "proxy error" in content_lower and "godaddy" in content_lower and len(content) < 400:
+        logger.info("Found GoDaddy proxy error specifically, likely parked")
         return True
     
-    # 7. Check for minimal content with specific patterns
+    # 4. For very minimal content, check for specific patterns but require more evidence
     if len(content.strip()) < 200:
-        indicators_found = 0
+        technical_issues = [
+            "domain not configured", "website coming soon", "under construction",
+            "site temporarily unavailable", "default web page"
+        ]
         
-        # a) Check for domain name mentions
-        if domain and domain.split('.')[0].lower() in content_lower:
-            domain_root = domain.split('.')[0].lower()
-            domain_mentions = content_lower.count(domain_root)
-            
-            if domain_mentions >= 2 and len(content.strip()) < 150:
-                indicators_found += 1
-                logger.info(f"Found indicator: Multiple domain name mentions in minimal content")
+        tech_count = sum(1 for issue in technical_issues if issue in content_lower)
         
-        # b) Very little content with no indicators of real site structure
-        if len(content.strip()) < 100:
-            # Check for JS frameworks before assuming parked
-            js_indicators = ["react", "angular", "vue", "javascript", "script", "bootstrap", "jquery"]
-            has_js_indicator = any(indicator in content_lower for indicator in js_indicators)
+        # For minimal content, require at least 2 technical indicators
+        if tech_count >= 2:
+            logger.info(f"Minimal content with multiple technical issues ({tech_count}), likely parked")
+            return True
             
-            # Check for HTML structure
-            html_indicators = ["<!doctype", "<html", "<head", "<meta", "<title", "<body", "<div"]
-            html_count = sum(1 for indicator in html_indicators if indicator in content_lower)
-            
-            # Check for content with useful text (to exclude parked domains)
-            content_indicators = ["about", "contact", "service", "product", "company", "team", "home", "blog"]
-            text_indicators = any(indicator in content_lower for indicator in content_indicators)
-            
-            if not has_js_indicator and html_count < 3 and not text_indicators:
-                indicators_found += 1
-                logger.info(f"Found indicator: Minimal HTML structure with no content indicators")
-        
-        # c) Check for organization-specific terms (to avoid false positives for businesses)
-        org_indicators = ["company", "business", "service", "product", "about us", "contact",
-                         "team", "mission", "vision", "customer", "client", "solution",
-                         "technology", "industry", "platform", "app", "application"]
-                         
-        # If org indicators are present, this is likely a real site with minimal content, not parked
-        if any(indicator in content_lower for indicator in org_indicators):
-            logger.info(f"Found organization indicators in content, not considering as parked")
-            return False
-            
-        # d) Check for few unique words
+        # Check for few unique words - a sign of placeholder content
         words = re.findall(r'\b\w+\b', content_lower)
         unique_words = set(words)
         
-        if len(unique_words) < 10:  # Stricter threshold
-            indicators_found += 1
-            logger.info(f"Found indicator: Very few unique words ({len(unique_words)})")
+        if len(words) < 15 or len(unique_words) < 10:
+            # ADDITIONAL CHECK - make sure it doesn't look like a legitimate minimal page
+            # Don't classify as parked if it has real business terms
+            business_terms = ["service", "contact", "about", "product", "company", "solution"]
+            has_business_content = any(term in content_lower for term in business_terms)
             
-        # Require multiple indicators for minimal content
-        if indicators_found >= 2:
-            logger.info(f"Domain has {indicators_found} indicators of being parked with minimal content")
-            return True
-            
-    # 8. Special case for GoDaddy proxy errors (for cases like crapanzano.net)
-    if "proxy error" in content_lower and len(content) < 500:
-        logger.info("Found proxy error message in minimal content, likely parked or inactive")
-        return True
-        
-    # 9. Special case for default web server pages
-    default_server_indicators = [
-        "default web page", "it works", "web server at", "apache is functioning",
-        "nginx is functioning", "server configuration", "default site", 
-        "default server page", "welcome to nginx"
-    ]
+            if not has_business_content:
+                logger.info(f"Very minimal content with few unique words ({len(unique_words)}), likely parked")
+                return True
     
-    if any(indicator in content_lower for indicator in default_server_indicators) and len(content) < 600:
-        logger.info("Found default web server page, considering as inactive")
-        return True
-    
+    # Default - not parked
     return False
 
 def check_special_domain_cases(domain: str, text_content: str) -> Optional[Dict[str, Any]]:
