@@ -90,6 +90,7 @@ def check_domain_dns(domain: str) -> Tuple[bool, Optional[str], bool]:
     Also detects potentially flaky sites that may fail during crawling.
     
     Enhanced to better detect non-existent domains and invalid TLDs.
+    Fixed to handle SSL certificate issues properly.
 
     Args:
         domain (str): The domain to check
@@ -135,12 +136,39 @@ def check_domain_dns(domain: str) -> Tuple[bool, Optional[str], bool]:
             
             logger.info(f"DNS resolution successful for domain: {clean_domain} (IP: {ip_address})")
             
+            # CRITICAL FIX: If DNS resolution works, we should try HTTPS with verify=False
+            try:
+                url = f"https://{clean_domain}"
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.5',
+                }
+                
+                # CRITICAL FIX: Set verify=False to ignore SSL certificate issues
+                response = requests.get(url, headers=headers, timeout=5.0, stream=True, allow_redirects=True, verify=False)
+                
+                # If HTTPS works, we're good
+                if response.status_code < 400:
+                    logger.info(f"HTTPS connection successful for {clean_domain} (ignoring SSL issues)")
+                    return True, None, False
+                
+            except requests.exceptions.SSLError as ssl_error:
+                # This is an SSL certificate issue, but DNS works
+                logger.warning(f"SSL certificate issue for {clean_domain}: {ssl_error}")
+                # Return True for has_dns, but add an SSL warning
+                return True, f"SSL certificate issue: {ssl_error}", potentially_flaky
+                
+            except Exception as https_error:
+                # Try HTTP as a fallback
+                logger.warning(f"HTTPS failed for {clean_domain}, trying HTTP: {https_error}")
+            
             # Step 2: Try to establish a reliable HTTP connection
             try:
                 logger.info(f"Attempting HTTP connection check for {clean_domain}")
                 session = requests.Session()
                 
-                # Try HTTPS first
+                # Try HTTPS first - with verify=False
                 success = False
                 remote_disconnect_https = False
                 https_ssl_error = False
@@ -160,7 +188,8 @@ def check_domain_dns(domain: str) -> Tuple[bool, Optional[str], bool]:
                             'Upgrade-Insecure-Requests': '1'
                         },
                         stream=True,
-                        allow_redirects=True
+                        allow_redirects=True,
+                        verify=False  # CRITICAL FIX: Ignore SSL certificate issues
                     )
                     
                     # CRITICAL: Actually try to read a chunk of content
@@ -194,7 +223,7 @@ def check_domain_dns(domain: str) -> Tuple[bool, Optional[str], bool]:
                         return True, None, False
                         
                 except requests.exceptions.SSLError as https_e:
-                    logger.warning(f"HTTPS failed for {clean_domain}, trying HTTP: {https_e}")
+                    logger.warning(f"HTTPS failed for {clean_domain} even with verify=False, trying HTTP: {https_e}")
                     
                     # Mark SSL error for special handling
                     https_ssl_error = True
@@ -285,6 +314,11 @@ def check_domain_dns(domain: str) -> Tuple[bool, Optional[str], bool]:
                     logger.warning(f"Domain {clean_domain} appears to be using anti-scraping protection - will attempt advanced crawlers")
                     return True, "anti_scraping_protection", True
                 
+                # CRITICAL FIX: If HTTPS failed with SSL errors, we should return that instead of a generic error
+                if https_ssl_error:
+                    logger.warning(f"Domain {clean_domain} has SSL certificate issues, but DNS works")
+                    return True, "ssl_error", potentially_flaky
+                
                 # If it failed with both HTTPS and HTTP, it's not usable
                 error_message = f"The domain {domain} resolves but the web server is not responding properly. The server might be misconfigured or blocking requests."
                 return False, error_message, potentially_flaky
@@ -297,6 +331,11 @@ def check_domain_dns(domain: str) -> Tuple[bool, Optional[str], bool]:
                     potentially_flaky = True
                     logger.warning(f"Domain {clean_domain} appears to be using anti-scraping protection - will attempt advanced crawlers")
                     return True, "anti_scraping_protection", True
+                
+                # CRITICAL FIX: Check for SSL certificate error messages
+                if "certificate" in str(conn_e).lower() or "ssl" in str(conn_e).lower():
+                    logger.warning(f"Domain {clean_domain} has SSL certificate issues, but DNS works")
+                    return True, "ssl_error", potentially_flaky
                     
                 return False, f"The domain {domain} resolves but cannot be connected to. The server might be down or blocking connections.", potentially_flaky
                 
@@ -334,6 +373,7 @@ def check_domain_dns(domain: str) -> Tuple[bool, Optional[str], bool]:
 def is_domain_worth_crawling(domain: str) -> tuple:
     """
     Determines if a domain is worth attempting a full crawl based on preliminary checks.
+    Fixed to properly handle SSL certificate issues.
 
     Args:
         domain (str): The domain to check
@@ -343,11 +383,28 @@ def is_domain_worth_crawling(domain: str) -> tuple:
     """
     has_dns, error_msg, potentially_flaky = check_domain_dns(domain)
     
+    # Special handling for DNS errors
+    if not has_dns and error_msg and ("DNS" in error_msg or "domain" in error_msg.lower() or "resolve" in error_msg.lower()):
+        logger.info(f"Domain {domain} has DNS resolution issues: {error_msg}")
+        return False, False, "dns_error", False
+    
+    # CRITICAL FIX: Special handling for SSL certificate errors
+    if error_msg and ("SSL" in error_msg or "ssl" in error_msg):
+        logger.info(f"Domain {domain} has SSL certificate issues: {error_msg}")
+        # We should still crawl these domains, but note they have SSL issues
+        return True, True, "ssl_error", potentially_flaky
+        
+    # CRITICAL FIX: Also check for "certificate verify failed" which might not have "SSL" in the message
+    if error_msg and "certificate" in error_msg.lower():
+        logger.info(f"Domain {domain} has certificate verification issues: {error_msg}")
+        # We should still crawl these domains, but note they have certificate issues
+        return True, True, "ssl_error", potentially_flaky
+    
     # CHANGE: Special handling for anti-scraping protection
     if error_msg == "anti_scraping_protection":
         logger.info(f"Domain {domain} has anti-scraping protection, will proceed with advanced crawlers")
         return True, has_dns, error_msg, potentially_flaky
-        
+    
     # Store HTTP success for later use
     http_success = error_msg == "http_success_https_failed"
     
@@ -355,21 +412,21 @@ def is_domain_worth_crawling(domain: str) -> tuple:
     if not has_dns or error_msg == "parked_domain":
         logger.info(f"Domain {domain} failed check: {error_msg}")
         return False, has_dns, error_msg, potentially_flaky
-        
+    
     # Be cautious with potentially flaky domains but still allow crawling
     if potentially_flaky:
         logger.warning(f"Domain {domain} may be flaky, proceeding with caution")
-        
+    
     # If HTTP worked but HTTPS failed, return a special signal
     if http_success:
         logger.info(f"Domain {domain} works with HTTP but not HTTPS, setting special flag")
         return True, has_dns, "http_success_https_failed", potentially_flaky
-        
+    
     return True, has_dns, error_msg, potentially_flaky
 
-def create_error_result(domain: str, error_type: Optional[str] = None,
-                       error_detail: Optional[str] = None, email: Optional[str] = None,
-                       crawler_type: Optional[str] = None) -> Dict[str, Any]:
+def create_error_result(domain: str, error_type: Optional[str] = None, 
+                      error_detail: Optional[str] = None, email: Optional[str] = None,
+                      crawler_type: Optional[str] = None) -> Dict[str, Any]:
     """
     Create a standardized error response based on the error type.
 
@@ -424,6 +481,9 @@ def create_error_result(domain: str, error_type: Optional[str] = None,
             else:
                 explanation += f"This is a security issue with the target website, not our classification service."
             error_result["is_ssl_error"] = True
+            
+            # CRITICAL FIX: For SSL errors, set a special predicted_class
+            error_result["predicted_class"] = "SSL Error"
         elif error_type == 'dns_error':
             explanation = f"We couldn't analyze {domain} because the domain could not be resolved. This typically means the domain doesn't exist or its DNS records are misconfigured."
             error_result["is_dns_error"] = True
@@ -465,6 +525,9 @@ def create_error_result(domain: str, error_type: Optional[str] = None,
             error_result["company_one_line"] = f"{domain} is a parked domain with no active business."
         elif error_type == "dns_error":
             error_result["company_one_line"] = f"The domain {domain} could not be resolved. DNS error."
+        # CRITICAL: Add specific handling for SSL errors
+        elif error_type and error_type.startswith("ssl_"):
+            error_result["company_one_line"] = f"Domain has SSL certificate issues but should be accessible."
         else:
             error_result["company_one_line"] = f"Unable to determine what {domain} does due to access issues. Will attempt enrichment from external sources."
     else:
@@ -473,6 +536,9 @@ def create_error_result(domain: str, error_type: Optional[str] = None,
             error_result["company_one_line"] = f"{domain} is a parked domain with no active business."
         elif error_type == "dns_error":
             error_result["company_one_line"] = f"The domain {domain} could not be resolved. DNS error."
+        # CRITICAL: Add specific handling for SSL errors
+        elif error_type and error_type.startswith("ssl_"):
+            error_result["company_one_line"] = f"Domain has SSL certificate issues but should be accessible."
         else:
             error_result["company_one_line"] = f"Unable to determine what {domain} does due to technical issues. Will attempt enrichment."
     
@@ -493,6 +559,9 @@ def create_error_result(domain: str, error_type: Optional[str] = None,
             error_result["final_classification"] = "7-No Website available"
         elif error_type in ["is_parked", "parked_domain"]:
             error_result["final_classification"] = "6-Parked Domain - no enrichment"
+        # CRITICAL FIX: For SSL errors, use Internal IT as default
+        elif error_type and error_type.startswith("ssl_"):
+            error_result["final_classification"] = "2-Internal IT"
         else:
             error_result["final_classification"] = "2-Internal IT"  # Default fallback
     
