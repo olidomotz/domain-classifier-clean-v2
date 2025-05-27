@@ -1,5 +1,6 @@
 """
 Comprehensive fixes for domain classifier.
+
 Addresses DNS error detection, parked domain detection, Apollo data usage,
 and timeout issues.
 """
@@ -25,28 +26,28 @@ logger = logging.getLogger(__name__)
 def apply_patches():
     """Apply all necessary patches for domain classifier."""
     logger.info("Applying comprehensive fixes to domain classifier...")
-    
+
     # Step 1: Enhance DNS error handling
     fix_dns_error_detection()
-    
+
     # Step 2: Improve parked domain detection
     fix_parked_domain_detection()
-    
+
     # Step 3: Fix Apollo data usage for classification
     fix_apollo_data_classification()
-    
+
     # Step 4: Fix timeout issues
     fix_timeout_issues()
-    
+
     # Step 5: Fix Process Did Not Complete classification
     fix_process_did_not_complete()
-    
+
     # Step 6: Set up monitoring
     setup_enhanced_monitoring()
-    
+
     # Step 7: Add request interceptor for DNS errors
     add_dns_error_interceptor()
-    
+
     logger.info("All patches successfully applied")
 
 def fix_dns_error_detection():
@@ -54,31 +55,31 @@ def fix_dns_error_detection():
     try:
         # Patch error_handling.py
         from domain_classifier.utils import error_handling
-        
+
         # Store original functions
         original_check_domain_dns = error_handling.check_domain_dns
         original_is_domain_worth_crawling = error_handling.is_domain_worth_crawling
-        
+
         def enhanced_check_domain_dns(domain: str) -> Tuple[bool, Optional[str], bool]:
             """
             Enhanced check_domain_dns with better non-existent domain detection.
             Properly identifies invalid TLDs and handles DNS errors.
             """
             potentially_flaky = False
-            
+
             try:
                 # Remove protocol if present
                 clean_domain = domain.replace('https://', '').replace('http://', '')
-                
+
                 # Remove path if present
                 if '/' in clean_domain:
                     clean_domain = clean_domain.split('/', 1)[0]
-                
+
                 # Check if TLD is valid - very basic check for common TLDs
-                valid_tlds = ['.com', '.net', '.org', '.io', '.co', '.edu', '.gov', '.info', '.biz', 
-                             '.ai', '.app', '.dev', '.me', '.tech', '.us', '.uk', '.ca', '.au', '.de', 
+                valid_tlds = ['.com', '.net', '.org', '.io', '.co', '.edu', '.gov', '.info', '.biz',
+                             '.ai', '.app', '.dev', '.me', '.tech', '.us', '.uk', '.ca', '.au', '.de',
                              '.fr', '.jp', '.cn', '.ru', '.br', '.it', '.nl', '.es', '.sg', '.in']
-                
+
                 domain_parts = clean_domain.split('.')
                 if len(domain_parts) > 1:
                     tld = f".{domain_parts[-1].lower()}"
@@ -86,13 +87,15 @@ def fix_dns_error_detection():
                         logger.warning(f"Domain {clean_domain} has an unusual TLD: {tld}")
                         # Non-standard TLD - likely invalid
                         return False, f"The domain {domain} has an unusual TLD ({tld}) which may not be valid.", False
-                
+
                 # Try a more definitive DNS check
                 try:
                     socket.setdefaulttimeout(3.0)  # 3 seconds max
+                    
                     # Try getaddrinfo for a thorough check
                     addr_info = socket.getaddrinfo(clean_domain, None)
                     ip_address = addr_info[0][4][0] if addr_info else None
+                    
                     logger.info(f"DNS resolution successful for domain: {clean_domain} (IP: {ip_address})")
                     
                     # Continue with original function for HTTP connection check
@@ -125,14 +128,15 @@ def fix_dns_error_detection():
                 except socket.timeout:
                     logger.warning(f"DNS resolution timed out for {domain}")
                     return False, f"Timed out while checking {domain}. DNS resolution timed out.", False
-                
+                    
             except Exception as e:
                 logger.error(f"Unexpected error checking domain {domain}: {e}")
                 return False, f"Error checking {domain}: {e}", False
-        
+
         # Patch is_domain_worth_crawling to ensure DNS errors are properly propagated
         def enhanced_is_domain_worth_crawling(domain: str) -> tuple:
             """Enhanced is_domain_worth_crawling that properly handles DNS errors."""
+            
             # Use enhanced check_domain_dns
             has_dns, error_msg, potentially_flaky = enhanced_check_domain_dns(domain)
             
@@ -140,12 +144,12 @@ def fix_dns_error_detection():
             if not has_dns and error_msg and ("DNS" in error_msg or "domain" in error_msg.lower() or "resolve" in error_msg.lower()):
                 logger.info(f"Domain {domain} has DNS resolution issues: {error_msg}")
                 return False, False, "dns_error", False
-                
+            
             # CHANGE: Special handling for anti-scraping protection
             if error_msg == "anti_scraping_protection":
                 logger.info(f"Domain {domain} has anti-scraping protection, will proceed with advanced crawlers")
                 return True, has_dns, error_msg, potentially_flaky
-                
+            
             # Store HTTP success for later use
             http_success = error_msg == "http_success_https_failed"
             
@@ -153,134 +157,32 @@ def fix_dns_error_detection():
             if not has_dns or error_msg == "parked_domain":
                 logger.info(f"Domain {domain} failed check: {error_msg}")
                 return False, has_dns, error_msg, potentially_flaky
-                
+            
             # Be cautious with potentially flaky domains but still allow crawling
             if potentially_flaky:
                 logger.warning(f"Domain {domain} may be flaky, proceeding with caution")
-                
+            
             # If HTTP worked but HTTPS failed, return a special signal
             if http_success:
                 logger.info(f"Domain {domain} works with HTTP but not HTTPS, setting special flag")
                 return True, has_dns, "http_success_https_failed", potentially_flaky
-                
+            
             return True, has_dns, error_msg, potentially_flaky
-        
+
         # Apply the patches
         error_handling.check_domain_dns = enhanced_check_domain_dns
         error_handling.is_domain_worth_crawling = enhanced_is_domain_worth_crawling
-        
+
         # Patch create_error_result to ensure DNS errors get the right classification
         original_create_error_result = error_handling.create_error_result
-        
-        def enhanced_create_error_result(domain: str, error_type: Optional[str] = None,
-                                       error_detail: Optional[str] = None, email: Optional[str] = None,
-                                       crawler_type: Optional[str] = None) -> Dict[str, Any]:
-            """Enhanced create_error_result that properly handles DNS errors."""
-            
-            # Get the basic error result from the original function
-            error_result = original_create_error_result(domain, error_type, error_detail, email, crawler_type)
-            
-            # Ensure DNS errors get the correct treatment
-            if error_type == "dns_error":
-                # CRITICAL: Set the predicted_class to "DNS Error" for better visibility
-                error_result["predicted_class"] = "DNS Error"
-                error_result["is_dns_error"] = True
-                error_result["final_classification"] = "7-No Website available"
-                
-                # Set a proper explanation
-                error_result["explanation"] = f"The domain {domain} could not be resolved. It may not exist or DNS records may be misconfigured."
-                
-                # Set company_description and one_line
-                error_result["company_description"] = f"The domain {domain} could not be resolved. It may not exist or DNS records may be misconfigured."
-                error_result["company_one_line"] = f"Domain cannot be reached - DNS error."
-            
-            return error_result
-        
-        # Apply the patch
-        error_handling.create_error_result = enhanced_create_error_result
-        
-        logger.info("✅ Applied DNS error detection fixes to error_handling.py")
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to fix DNS error detection: {e}")
 
-def add_dns_error_interceptor():
-    """Add a DNS error interceptor at the Flask level to catch DNS errors early."""
-    try:
-        # Use Flask request processing to catch DNS errors
-        import flask
-        from flask import request, jsonify
-        
-        # Create a decorator that can be applied to route handlers
-        def dns_error_handler(app):
-            @app.before_request
-            def check_dns_before_request():
-                # Only intercept POST requests to /classify-and-enrich
-                if request.method == 'POST' and request.path == '/classify-and-enrich':
-                    try:
-                        # Extract data from request
-                        data = request.json
-                        if not data:
-                            return None
-                            
-                        input_value = data.get('url', '').strip()
-                        if not input_value:
-                            return None
-                            
-                        # Determine if input is an email
-                        is_email = '@' in input_value
-                        email = input_value if is_email else None
-                        
-                        # Extract domain
-                        domain = None
-                        if is_email:
-                            from domain_classifier.utils.domain_utils import extract_domain_from_email
-                            domain = extract_domain_from_email(input_value)
-                        else:
-                            from domain_classifier.utils.domain_utils import normalize_domain
-                            domain = normalize_domain(input_value)
-                            
-                        if not domain:
-                            return None
-                            
-                        # Create URL for checking
-                        url = f"https://{domain}"
-                        
-                        # Check for DNS resolution
-                        from domain_classifier.utils.error_handling import is_domain_worth_crawling
-                        worth_crawling, has_dns, error_msg, potentially_flaky = is_domain_worth_crawling(domain)
-                        
-                        # For DNS errors, create a response and return immediately
-                        if not has_dns and (error_msg == "dns_error" or "dns" in str(error_msg).lower()):
-                            logger.info(f"DNS error detected for {domain}, returning DNS error response")
-                            
-                            from domain_classifier.utils.error_handling import create_error_result
-                            error_result = create_error_result(
-                                domain,
-                                "dns_error",
-                                error_msg if error_msg != "dns_error" else None,
-                                email,
-                                "early_check"
-                            )
-                            
-                            error_result["website_url"] = url
-                            error_result["final_classification"] = "7-No Website available"
-                            error_result["predicted_class"] = "DNS Error"
-                            
-                            # Format the response
-                            try:
-                                from domain_classifier.utils.api_formatter import format_api_response
-                                formatted_result = format_api_response(error_result)
-                                return jsonify(formatted_result), 200
-                            except Exception as format_error:
-                                logger.error(f"Error formatting DNS error response: {format_error}")
-                                return jsonify(error_result), 200
-                    
+        def enhanced_create_error_result(domain: str, error_type: Optional[str] = None,
+                                
                     except Exception as e:
                         logger.error(f"Error in DNS error handler: {e}")
-                
-                # For all other cases, proceed with normal request handling
-                return None
+                    
+                    # For all other cases, proceed with normal request handling
+                    return None
         
         # Try different methods to patch the app
         try:
@@ -306,11 +208,13 @@ def add_dns_error_interceptor():
                 
                 # Replace the create_app function
                 sys.modules['domain_classifier.api.app'].create_app = patched_create_app
+                
                 logger.info("✅ Patched create_app to add DNS error interceptor")
                 return
+                
             except (ImportError, AttributeError) as e:
                 logger.warning(f"Could not patch create_app: {e}")
-            
+                
             # Method 3: Monkey patch Flask itself
             try:
                 original_full_dispatch_request = flask.Flask.full_dispatch_request
@@ -349,6 +253,7 @@ def add_dns_error_interceptor():
                                             logger.info(f"DNS error detected for {domain}, returning DNS error response")
                                             
                                             from domain_classifier.utils.error_handling import create_error_result
+                                            
                                             error_result = create_error_result(
                                                 domain,
                                                 "dns_error",
@@ -356,7 +261,6 @@ def add_dns_error_interceptor():
                                                 email,
                                                 "early_check"
                                             )
-                                            
                                             error_result["website_url"] = url
                                             error_result["final_classification"] = "7-No Website available"
                                             error_result["predicted_class"] = "DNS Error"
@@ -377,11 +281,13 @@ def add_dns_error_interceptor():
                 
                 # Apply the patch
                 flask.Flask.full_dispatch_request = patched_full_dispatch_request
+                
                 logger.info("✅ Applied global Flask request handler patch for DNS errors")
                 return
+                
             except Exception as flask_error:
                 logger.warning(f"Could not patch Flask request dispatch: {flask_error}")
-            
+                
             # Method 4: Try to find and patch specific routes
             try:
                 # Find all route modules
@@ -425,6 +331,7 @@ def add_dns_error_interceptor():
                                                     logger.info(f"DNS error detected in patched route function for {domain}")
                                                     
                                                     from domain_classifier.utils.error_handling import create_error_result
+                                                    
                                                     error_result = create_error_result(
                                                         domain,
                                                         "dns_error",
@@ -432,7 +339,6 @@ def add_dns_error_interceptor():
                                                         email,
                                                         "early_check"
                                                     )
-                                                    
                                                     error_result["website_url"] = f"https://{domain}"
                                                     error_result["final_classification"] = "7-No Website available"
                                                     error_result["predicted_class"] = "DNS Error"
@@ -447,16 +353,18 @@ def add_dns_error_interceptor():
                                                         return jsonify(error_result), 200
                                 except Exception as e:
                                     logger.error(f"Error in patched route function: {e}")
-                            
+                                    
                             # Otherwise, proceed with original function
                             return original_func(*args, **kwargs)
-                        
+                            
                         # Apply the patch
                         setattr(enrich, name, patched_function)
+                        
                         logger.info(f"✅ Applied DNS error handling to route function: {name}")
                         return
                 
                 logger.warning("Could not find appropriate route function to patch")
+                
             except Exception as route_error:
                 logger.warning(f"Could not patch route functions: {route_error}")
                 
@@ -466,99 +374,308 @@ def add_dns_error_interceptor():
     except Exception as e:
         logger.error(f"❌ Failed to add DNS error interceptor: {e}")
 
+# Run the patches if this module is executed directly
+if __name__ == "__main__":
+    # Configure basic logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    # Apply all patches
+    apply_patches()       error_detail: Optional[str] = None, email: Optional[str] = None,
+                                       crawler_type: Optional[str] = None) -> Dict[str, Any]:
+            """Enhanced create_error_result that properly handles DNS errors."""
+            
+            # Get the basic error result from the original function
+            error_result = original_create_error_result(domain, error_type, error_detail, email, crawler_type)
+            
+            # Ensure DNS errors get the correct treatment
+            if error_type == "dns_error":
+                # CRITICAL: Set the predicted_class to "DNS Error" for better visibility
+                error_result["predicted_class"] = "DNS Error"
+                error_result["is_dns_error"] = True
+                error_result["final_classification"] = "7-No Website available"
+                
+                # Set a proper explanation
+                error_result["explanation"] = f"The domain {domain} could not be resolved. It may not exist or DNS records may be misconfigured."
+                
+                # Set company_description and one_line
+                error_result["company_description"] = f"The domain {domain} could not be resolved. It may not exist or DNS records may be misconfigured."
+                error_result["company_one_line"] = f"Domain cannot be reached - DNS error."
+                
+            return error_result
+
+        # Apply the patch
+        error_handling.create_error_result = enhanced_create_error_result
+
+        logger.info("✅ Applied DNS error detection fixes to error_handling.py")
+
+    except Exception as e:
+        logger.error(f"❌ Failed to fix DNS error detection: {e}")
+
 def fix_parked_domain_detection():
-    """Fix parked domain detection to catch more cases like crapanzano.net."""
+    """Fix parked domain detection to catch actual parked domains while avoiding false positives."""
     try:
         from domain_classifier.classifiers import decision_tree
-        
-        original_is_parked = decision_tree.is_parked_domain
-        
+
+        # Define a completely new implementation
         def enhanced_is_parked_domain(content: str, domain: str = None) -> bool:
-            """Enhanced detection of truly parked domains vs. just having minimal content."""
+            """
+            Fixed parked domain detection with better balance between detection and false positives.
+            Args:
+                content: The website content
+                domain: Optional domain name for additional checks
+            Returns:
+                bool: True if the domain is parked/inactive
+            """
             if not content:
                 logger.info("Domain has no content at all, considering as parked")
                 return True
                 
             content_lower = content.lower()
             
-            # Special case for GoDaddy proxy errors (for cases like crapanzano.net)
-            # This has to be checked first to catch proxy errors
-            if ("proxy error" in content_lower or "connection refused" in content_lower) and len(content) < 500:
-                logger.info("Found proxy error message in minimal content, likely parked or inactive")
+            # 1. Check for DEFINITIVE parking indicators (highest confidence)
+            definitive_indicators = [
+                "domain is for sale", "buy this domain", "domain parking",
+                "this domain is for sale", "parked by", "domain broker",
+                "inquire about this domain", "this domain is available for purchase",
+                "bid on this domain"
+            ]
+            
+            for indicator in definitive_indicators:
+                if indicator in content_lower:
+                    logger.info(f"Domain contains definitive parking indicator: '{indicator}'")
+                    return True
+            
+            # 2. Check for combinations of parking-related indicators
+            parking_phrases = [
+                "domain may be for sale", "domain for sale", "domain name parking",
+                "purchase this domain", "domain has expired", "domain available"
+            ]
+            
+            hosting_mentions = [
+                "godaddy", "namecheap", "domain.com", "namesilo", "porkbun",
+                "domain registration", "web hosting service", "hosting provider",
+                "register this domain", "parkingcrew", "sedo", "bodis", "parked.com"
+            ]
+            
+            parking_count = sum(1 for phrase in parking_phrases if phrase in content_lower)
+            hosting_count = sum(1 for phrase in hosting_mentions if phrase in content_lower)
+            
+            # Require stronger evidence - multiple indicators or specific combinations
+            if parking_count >= 2 or (parking_count >= 1 and hosting_count >= 1):
+                logger.info(f"Domain has multiple parking indicators: {parking_count} parking phrases, {hosting_count} hosting mentions")
                 return True
             
-            # 1. Direct explicit parking phrases
-            explicit_parking_phrases = [
-                "domain is for sale", "buy this domain", "purchasing this domain",
-                "domain may be for sale", "this domain is for sale", "parked by",
-                "domain parking", "this web page is parked", "domain for sale",
-                "this website is for sale", "domain name parking",
-                "purchase this domain", "domain has expired", "domain available",
-                "domain not configured", "inquire about this domain", 
-                "this domain is available for purchase", "domain has been registered",
-                "domain has expired", "reserve this domain name", "bid on this domain"
-            ]
+            # 3. Special case for GoDaddy proxy errors - but with stricter requirements
+            if "proxy error" in content_lower and "godaddy" in content_lower and len(content) < 400:
+                logger.info("Found GoDaddy proxy error specifically, likely parked")
+                return True
             
-            # 2. Expanded list of hosting providers and registrars
-            hosting_providers = [
-                "godaddy", "hostgator", "bluehost", "namecheap", "dreamhost",
-                "domain registration", "web hosting service", "hosting provider",
-                "register this domain", "domain broker", "proxy error", "error connecting",
-                "domain has expired", "domain has been registered", "courtesy page",
-                "ionos", "domain.com", "hover", "namesilo", "porkbun", 
-                "network solutions", "register.com", "name.com", "enom", 
-                "dynadot", "hover", "domainking", "domainmonster", "1and1", 
-                "1&1", "ionos", "registrar", "dominio", "parkingcrew"
-            ]
-            
-            # 3. Technical issues phrases
-            technical_phrases = [
-                "proxy error", "error connecting", "connection error", "courtesy page",
-                "site not found", "domain not configured", "default web page",
-                "website coming soon", "under construction", "future home of",
-                "site temporarily unavailable", "domain has been registered",
-                "refused to connect", "connection refused", "this page isn't working"
-            ]
-            
-            # Count explicit parking phrases
-            explicit_matches = sum(1 for phrase in explicit_parking_phrases if phrase in content_lower)
-            
-            # If we have 1 or more explicit parking indicators, check for additional evidence
-            if explicit_matches >= 1:
-                logger.info(f"Domain contains explicit parking phrases, checking for additional evidence")
+            # 4. For very minimal content, check for specific patterns but require more evidence
+            if len(content.strip()) < 200:
+                technical_issues = [
+                    "domain not configured", "website coming soon", "under construction",
+                    "site temporarily unavailable", "default web page"
+                ]
                 
-                # Check for hosting providers
-                hosting_matches = sum(1 for phrase in hosting_providers if phrase in content_lower)
-                if hosting_matches >= 1:
-                    logger.info(f"Domain contains explicit parking phrase and hosting provider reference, considering as parked")
+                tech_count = sum(1 for issue in technical_issues if issue in content_lower)
+                
+                # For minimal content, require at least 2 technical indicators
+                if tech_count >= 2:
+                    logger.info(f"Minimal content with multiple technical issues ({tech_count}), likely parked")
                     return True
                     
-                # Check for technical issues phrases
-                tech_matches = sum(1 for phrase in technical_phrases if phrase in content_lower)
-                if tech_matches >= 1:
-                    logger.info(f"Domain contains explicit parking phrase and technical issues, considering as parked")
-                    return True
+                # Check for few unique words - a sign of placeholder content
+                words = re.findall(r'\b\w+\b', content_lower)
+                unique_words = set(words)
+                
+                if len(words) < 15 or len(unique_words) < 10:
+                    # ADDITIONAL CHECK - make sure it doesn't look like a legitimate minimal page
+                    # Don't classify as parked if it has real business terms
+                    business_terms = ["service", "contact", "about", "product", "company", "solution"]
+                    has_business_content = any(term in content_lower for term in business_terms)
+                    
+                    if not has_business_content:
+                        logger.info(f"Very minimal content with few unique words ({len(unique_words)}), likely parked")
+                        return True
             
-            # 4. Common hosting/registrar parking indicators with technical issues
-            hosting_matches = sum(1 for phrase in hosting_providers if phrase in content_lower)
-            tech_matches = sum(1 for phrase in technical_phrases if phrase in content_lower)
-            
-            # If multiple indicators, likely parked
-            if (hosting_matches >= 2) or (hosting_matches >= 1 and tech_matches >= 1):
-                logger.info(f"Domain contains multiple hosting/registrar/technical indicators, considering as parked")
-                return True
-            
-            # If minimal content and contains technical issues phrases, likely parked
-            if len(content.strip()) < 300 and tech_matches >= 1:
-                logger.info(f"Domain contains minimal content with technical issues, considering as parked")
-                return True
-            
-            # Fall back to original implementation for other cases
-            return original_is_parked(content, domain)
-        
+            # Default - not parked
+            return False
+
         # Apply the patch
         decision_tree.is_parked_domain = enhanced_is_parked_domain
-        logger.info("✅ Applied parked domain detection fixes to decision_tree.py")
+        
+        logger.info("✅ Applied fixed parked domain detection to decision_tree.py")
+        
+        # Also patch quick_parked_check in apify_crawler.py
+        try:
+            from domain_classifier.crawlers import apify_crawler
+            
+            # Store original function
+            original_quick_parked_check = apify_crawler.quick_parked_check
+            
+            def quick_parked_check_patch(url: str):
+                """
+                Patched version of quick_parked_check that's less aggressive.
+                Args:
+                    url: The URL to check
+                Returns:
+                    tuple: (is_parked, content) where is_parked is a boolean and content is the content if available
+                """
+                try:
+                    # Parse domain for checking
+                    domain = urlparse(url).netloc
+                    if domain.startswith('www.'):
+                        domain = domain[4:]
+
+                    # First try HTTPS request
+                    try:
+                        # Try quick direct request with HTTPS
+                        headers = {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                            'Accept-Language': 'en-US,en;q=0.5',
+                            'Connection': 'keep-alive',
+                            'Cache-Control': 'no-cache'
+                        }
+                        
+                        # Set a low timeout to fail quickly
+                        # IMPORTANT: Set allow_redirects=True to follow redirects
+                        response = requests.get(url, headers=headers, timeout=5.0, stream=True, allow_redirects=True)
+
+                        # Log redirect if it happened
+                        if response.history:
+                            redirect_chain = " -> ".join([r.url for r in response.history])
+                            final_url = response.url
+                            logger.info(f"Followed HTTPS redirect chain: {redirect_chain} -> {final_url}")
+                            
+                            # If redirected to a different domain, update for parked check
+                            final_domain = urlparse(final_url).netloc
+                            if final_domain != domain and final_domain.startswith('www.'):
+                                final_domain = final_domain[4:]
+                                
+                            if final_domain != domain:
+                                logger.info(f"Domain redirected from {domain} to {final_domain}")
+                                domain = final_domain
+
+                        # Get a chunk of content
+                        content = next(response.iter_content(2048), None)
+                        if content:
+                            content_str = content.decode('utf-8', errors='ignore')
+                            
+                            # Check for DEFINITIVE parked domain indicators only in quick check
+                            parked_indicators = [
+                                "domain is for sale", "buy this domain", "domain parking",
+                                "this domain is for sale", "parked by"
+                            ]
+                            
+                            if any(indicator in content_str.lower() for indicator in parked_indicators):
+                                logger.info(f"Quick check found definitive parked domain indicators for {domain}")
+                                return True, content_str
+                                
+                            # If not immediately obvious from first chunk, get more content
+                            full_content = content_str
+                            try:
+                                # Get up to 10KB more
+                                for _ in range(5):
+                                    chunk = next(response.iter_content(2048), None)
+                                    if not chunk:
+                                        break
+                                    chunk_str = chunk.decode('utf-8', errors='ignore')
+                                    full_content += chunk_str
+                                    
+                                # Use the fixed parked domain detection function to determine if it's parked
+                                from domain_classifier.classifiers.decision_tree import is_parked_domain
+                                if is_parked_domain(full_content, domain):
+                                    logger.info(f"Quick check determined {domain} is a parked domain")
+                                    return True, full_content
+                                    
+                            except Exception as e:
+                                logger.warning(f"Error in additional content check: {e}")
+                                
+                            return False, full_content
+                            
+                    except (requests.exceptions.SSLError, requests.exceptions.ConnectionError) as e:
+                        logger.warning(f"HTTPS failed in quick parked check: {e}, trying HTTP")
+                        
+                        # Fall back to HTTP if HTTPS fails
+                        try:
+                            http_url = url.replace("https://", "http://")
+                            if not http_url.startswith("http"):
+                                http_url = "http://" + url
+                                
+                            # IMPORTANT: Set allow_redirects=True to follow redirects
+                            response = requests.get(http_url, headers=headers, timeout=5.0, stream=True, allow_redirects=True)
+                            
+                            # Log redirect if it happened
+                            if response.history:
+                                redirect_chain = " -> ".join([r.url for r in response.history])
+                                final_url = response.url
+                                logger.info(f"Followed HTTP redirect chain: {redirect_chain} -> {final_url}")
+                                
+                                # If redirected to a different domain, update for parked check
+                                final_domain = urlparse(final_url).netloc
+                                if final_domain != domain and final_domain.startswith('www.'):
+                                    final_domain = final_domain[4:]
+                                    
+                                if final_domain != domain:
+                                    logger.info(f"Domain redirected from {domain} to {final_domain}")
+                                    domain = final_domain
+                            
+                            # Get a chunk of content
+                            content = next(response.iter_content(2048), None)
+                            if content:
+                                content_str = content.decode('utf-8', errors='ignore')
+                                
+                                # Check for DEFINITIVE parked domain indicators only in quick check
+                                parked_indicators = [
+                                    "domain is for sale", "buy this domain", "domain parking",
+                                    "this domain is for sale", "parked by"
+                                ]
+                                
+                                if any(indicator in content_str.lower() for indicator in parked_indicators):
+                                    logger.info(f"HTTP quick check found definitive parked domain indicators for {domain}")
+                                    return True, content_str
+                                    
+                                # If not immediately obvious, get more content
+                                full_content = content_str
+                                try:
+                                    # Get up to 10KB more
+                                    for _ in range(5):
+                                        chunk = next(response.iter_content(2048), None)
+                                        if not chunk:
+                                            break
+                                        chunk_str = chunk.decode('utf-8', errors='ignore')
+                                        full_content += chunk_str
+                                        
+                                    # Use the fixed parked domain detection function to determine if it's parked
+                                    from domain_classifier.classifiers.decision_tree import is_parked_domain
+                                    if is_parked_domain(full_content, domain):
+                                        logger.info(f"HTTP quick check determined {domain} is a parked domain")
+                                        return True, full_content
+                                        
+                                except Exception as e:
+                                    logger.warning(f"Error in HTTP additional content check: {e}")
+                                    
+                                return False, full_content
+                                
+                        except Exception as http_e:
+                            logger.warning(f"HTTP also failed in quick parked check: {http_e}")
+                            return False, None
+                            
+                except Exception as e:
+                    logger.warning(f"Quick parked domain check failed: {e}")
+                    
+                return False, None
+
+            # Apply the patch to apify_crawler
+            apify_crawler.quick_parked_check = quick_parked_check_patch
+            logger.info("✅ Applied fixed quick_parked_check to apify_crawler.py")
+            
+        except Exception as crawler_e:
+            logger.error(f"❌ Failed to patch apify_crawler.py: {crawler_e}")
         
     except Exception as e:
         logger.error(f"❌ Failed to fix parked domain detection: {e}")
@@ -568,9 +685,9 @@ def fix_apollo_data_classification():
     try:
         # Patch description_enhancer.py to use Apollo data for classification
         from domain_classifier.enrichment import description_enhancer
-        
+
         original_generate_detailed_description = description_enhancer.generate_detailed_description
-        
+
         def enhanced_generate_detailed_description(classification: Dict[str, Any],
                                                 apollo_data: Optional[Dict] = None,
                                                 apollo_person_data: Optional[Dict] = None) -> str:
@@ -578,7 +695,7 @@ def fix_apollo_data_classification():
             try:
                 # Domain name for logging
                 domain = classification.get("domain", "unknown")
-                
+
                 # Handle DNS error cases
                 if classification.get("error_type") == "dns_error" or classification.get("is_dns_error") == True:
                     logger.info(f"DNS error detected in generate_detailed_description for {domain}")
@@ -588,7 +705,7 @@ def fix_apollo_data_classification():
                     classification["predicted_class"] = "DNS Error"
                     
                     return f"The domain {domain} could not be resolved. It may not exist or its DNS records may be misconfigured."
-                
+
                 # Handle Process Did Not Complete but with Apollo data
                 if classification.get("predicted_class") == "Process Did Not Complete" and apollo_data:
                     # Get description from Apollo
@@ -598,7 +715,7 @@ def fix_apollo_data_classification():
                             description = apollo_data.get(field)
                             logger.info(f"Found Apollo {field} for {domain}")
                             break
-                    
+                            
                     if description:
                         # Try to classify using the description
                         try:
@@ -654,8 +771,9 @@ def fix_apollo_data_classification():
                                             "Integrator - Residential A/V": 10,
                                             "Internal IT Department": 70
                                         }
-                                        # Also set a default confidence score
-                                        classification["confidence_score"] = 50
+                                        
+                                    # Also set a default confidence score
+                                    classification["confidence_score"] = 50
                                     
                                     # Set is_service_business based on the classification
                                     classification["is_service_business"] = classification["predicted_class"] in [
@@ -678,9 +796,10 @@ def fix_apollo_data_classification():
                                     # Add a note about using Apollo data
                                     return f"{description}\n\nNote: This description is based on Apollo data as the website could not be analyzed."
                                 else:
-                                    # If LLM classification failed but we have Apollo data, 
+                                    # If LLM classification failed but we have Apollo data,
                                     # use "Internal IT Department" as a fallback with Apollo description
                                     logger.info(f"LLM classification with Apollo data failed, using fallback for {domain}")
+                                    
                                     classification["predicted_class"] = "Internal IT Department"
                                     classification["detection_method"] = "apollo_data_classification"
                                     classification["source"] = "apollo_data"
@@ -698,43 +817,48 @@ def fix_apollo_data_classification():
                                     # Set a company name if not present
                                     if not classification.get("company_name") and apollo_data.get("name"):
                                         classification["company_name"] = apollo_data.get("name")
-                                        
+                                    
                                     return f"{description}\n\nNote: This description is based on Apollo data as the website could not be analyzed."
+                                    
                         except Exception as e:
                             logger.error(f"Error classifying with Apollo data: {e}")
-                            # Provide a fallback classification when LLM fails but we have Apollo data
-                            if description:
-                                logger.info(f"Using fallback classification with Apollo data for {domain}")
-                                classification["predicted_class"] = "Internal IT Department"
-                                classification["detection_method"] = "apollo_data_classification"
-                                classification["source"] = "apollo_data"
-                                classification["confidence_scores"] = {
-                                    "Managed Service Provider": 10,
-                                    "Integrator - Commercial A/V": 10,
-                                    "Integrator - Residential A/V": 10, 
-                                    "Internal IT Department": 70
-                                }
-                                classification["confidence_score"] = 50
-                                classification["is_service_business"] = False
-                                classification["final_classification"] = "2-Internal IT"
-                                classification["company_description"] = description
-                                
-                                # Set a company name if not present
-                                if not classification.get("company_name") and apollo_data.get("name"):
-                                    classification["company_name"] = apollo_data.get("name")
-                                    
-                                return f"{description}\n\nNote: This description is based on Apollo data as the website could not be analyzed."
-                
+                            
+                        # Provide a fallback classification when LLM fails but we have Apollo data
+                        if description:
+                            logger.info(f"Using fallback classification with Apollo data for {domain}")
+                            
+                            classification["predicted_class"] = "Internal IT Department"
+                            classification["detection_method"] = "apollo_data_classification"
+                            classification["source"] = "apollo_data"
+                            classification["confidence_scores"] = {
+                                "Managed Service Provider": 10,
+                                "Integrator - Commercial A/V": 10,
+                                "Integrator - Residential A/V": 10,
+                                "Internal IT Department": 70
+                            }
+                            classification["confidence_score"] = 50
+                            classification["is_service_business"] = False
+                            classification["final_classification"] = "2-Internal IT"
+                            classification["company_description"] = description
+                            
+                            # Set a company name if not present
+                            if not classification.get("company_name") and apollo_data.get("name"):
+                                classification["company_name"] = apollo_data.get("name")
+                            
+                            return f"{description}\n\nNote: This description is based on Apollo data as the website could not be analyzed."
+
                 # For all other cases, use the original function
                 return original_generate_detailed_description(classification, apollo_data, apollo_person_data)
+                
             except Exception as e:
                 logger.error(f"Error in enhanced_generate_detailed_description: {e}")
                 return original_generate_detailed_description(classification, apollo_data, apollo_person_data)
-        
+
         # Apply the patch
         description_enhancer.generate_detailed_description = enhanced_generate_detailed_description
+
         logger.info("✅ Applied Apollo data classification fixes to description_enhancer.py")
-        
+
     except Exception as e:
         logger.error(f"❌ Failed to fix Apollo data classification: {e}")
 
@@ -757,7 +881,7 @@ def fix_timeout_issues():
                 domain = urlparse(url).netloc
                 if domain.startswith('www.'):
                     domain = domain[4:]
-                
+                    
                 # Quick DNS check before attempting full crawl
                 try:
                     socket.gethostbyname(domain)
@@ -795,8 +919,10 @@ def fix_timeout_issues():
                     logger.info(f"Direct crawl got insufficient content ({direct_content_length} chars), trying Scrapy for {url}")
                     
                     from domain_classifier.crawlers.scrapy_crawler import scrapy_crawl
+                    
                     # REDUCED TIMEOUT: Only wait 15 seconds instead of 30+
                     scrapy_content, (scrapy_error_type, scrapy_error_detail) = scrapy_crawl(url, timeout=15)
+                    
                     scrapy_content_length = len(scrapy_content.strip()) if scrapy_content else 0
                     
                     # Log detailed debug info
@@ -818,6 +944,7 @@ def fix_timeout_issues():
                         logger.info(f"Using minimal Scrapy content: {scrapy_content_length} chars")
                         apify_crawler.track_crawler_usage("scrapy_minimal")
                         return scrapy_content, (None, None), "scrapy_minimal"
+                    
                 else:
                     # Direct crawl got good content, use it directly
                     logger.info(f"Direct crawl successful with {direct_content_length} chars, using it without trying Scrapy")
@@ -837,7 +964,7 @@ def fix_timeout_issues():
                     
                     # IMPORTANT: Use a short timeout and ensure redirects are followed
                     content, (final_error_type, final_error_detail), final_crawler_type = direct_crawl(
-                        f"http://{domain}", 
+                        f"http://{domain}",
                         timeout=8.0  # Very short timeout
                     )
                     
@@ -845,7 +972,7 @@ def fix_timeout_issues():
                         logger.info(f"Final HTTP attempt successful for {domain}")
                         apify_crawler.track_crawler_usage("direct_http_final")
                         return content, (None, None), "direct_http_final"
-                    
+                        
                 except Exception as final_e:
                     logger.warning(f"Final HTTP attempt failed: {final_e}")
                 
@@ -879,9 +1006,9 @@ def fix_timeout_issues():
                     "startUrls": [{"url": url}],
                     "maxCrawlingDepth": 1,
                     "maxCrawlPages": 3,  # REDUCED from 5
-                    "timeoutSecs": 20,   # REDUCED from 30
+                    "timeoutSecs": 20,  # REDUCED from 30
                     "maxRequestRetries": 2,  # REDUCED from 3
-                    "maxRedirects": 5,   # REDUCED from 10
+                    "maxRedirects": 5,  # REDUCED from 10
                     "forceResponseEncoding": "utf-8"
                 }
                 
@@ -890,10 +1017,8 @@ def fix_timeout_issues():
                 try:
                     response = requests.post(endpoint, json=payload, headers=headers, timeout=10)  # REDUCED from 15
                     response.raise_for_status()
-                    
                     run_id = response.json()['data']['id']
                     logger.info(f"Successfully started Apify run with ID: {run_id}")
-                    
                 except Exception as e:
                     logger.error(f"Error starting Apify crawl: {e}")
                     return None, apify_crawler.detect_error_type(str(e))
@@ -973,11 +1098,12 @@ def fix_timeout_issues():
                     # Create a wrapper that uses the provided timeout
                     def timeout_wrapper(url):
                         import crochet
+                        
                         # Use the crochet.run_in_reactor decorator with our custom timeout
                         @crochet.wait_for(timeout=timeout)
                         def _run_with_timeout():
                             return crawler.runner.crawl(scrapy_crawler.EnhancedScrapySpider, url=url)
-                        
+                            
                         return _run_with_timeout()
                     
                     # Replace the method
@@ -1004,7 +1130,7 @@ def fix_timeout_issues():
                             return content, (None, None)
                         else:
                             return None, ("unexpected_error", "Unexpected result format from scraper")
-                        
+                            
                 except Exception as e:
                     error_type, error_detail = scrapy_crawler.detect_error_type(str(e))
                     logger.error(f"Error in Enhanced Scrapy crawler: {e} (Type: {error_type})")
@@ -1016,32 +1142,34 @@ def fix_timeout_issues():
             # Also modify the _run_spider method timeout in the original EnhancedScrapyCrawler class
             # This is a bit hacky but ensures the timeout is properly set
             original_crochet_decorator = None
+            
             for attr_name in dir(scrapy_crawler.EnhancedScrapyCrawler):
                 attr = getattr(scrapy_crawler.EnhancedScrapyCrawler, attr_name)
                 if attr_name == '_run_spider' and callable(attr):
                     # Get the original decorator
                     if hasattr(attr, '__wrapped__'):
                         original_crochet_decorator = attr.__wrapped__
-                        
-                        # Create a new decorator with reduced timeout
-                        import crochet
-                        new_crochet_decorator = crochet.wait_for(timeout=15.0)  # REDUCED from 45.0
-                        
-                        # Create a new function with the new decorator
-                        @new_crochet_decorator
-                        def new_run_spider(self, url):
-                            return self.runner.crawl(scrapy_crawler.EnhancedScrapySpider, url=url)
-                            
-                        # Replace the method
-                        scrapy_crawler.EnhancedScrapyCrawler._run_spider = new_run_spider
-                        logger.info("✅ Reduced timeout for _run_spider in EnhancedScrapyCrawler")
-                        break
+                    
+                    # Create a new decorator with reduced timeout
+                    import crochet
+                    new_crochet_decorator = crochet.wait_for(timeout=15.0)  # REDUCED from 45.0
+                    
+                    # Create a new function with the new decorator
+                    @new_crochet_decorator
+                    def new_run_spider(self, url):
+                        return self.runner.crawl(scrapy_crawler.EnhancedScrapySpider, url=url)
+                    
+                    # Replace the method
+                    scrapy_crawler.EnhancedScrapyCrawler._run_spider = new_run_spider
+                    
+                    logger.info("✅ Reduced timeout for _run_spider in EnhancedScrapyCrawler")
+                    break
             
             # Also update custom_settings in the EnhancedScrapySpider class
             if hasattr(scrapy_crawler, 'EnhancedScrapySpider') and hasattr(scrapy_crawler.EnhancedScrapySpider, 'custom_settings'):
                 reduced_settings = {
                     'DOWNLOAD_TIMEOUT': 15,  # REDUCED from 60
-                    'RETRY_TIMES': 2,        # REDUCED from 4
+                    'RETRY_TIMES': 2,  # REDUCED from 4
                     'CONCURRENT_REQUESTS': 2,  # REDUCED from 4
                     'DOWNLOAD_MAXSIZE': 1048576,  # 1MB (REDUCED from 10MB)
                     'REDIRECT_MAX_TIMES': 5,  # REDUCED from 15
@@ -1052,12 +1180,12 @@ def fix_timeout_issues():
                     scrapy_crawler.EnhancedScrapySpider.custom_settings[key] = value
                     
                 logger.info("✅ Reduced timeouts in EnhancedScrapySpider custom_settings")
-            
+                
             logger.info("✅ Applied timeout fixes to scrapy_crawler.py")
             
         except Exception as e:
             logger.error(f"❌ Failed to patch scrapy_crawler.py for timeouts: {e}")
-        
+            
         logger.info("✅ Applied timeout fixes to crawler modules")
         
     except Exception as e:
@@ -1072,6 +1200,7 @@ def fix_process_did_not_complete():
         
         def patched_determine_final_classification(result: Dict[str, Any]) -> str:
             """Directly patched version that handles Process Did Not Complete properly."""
+            
             # Get the domain for logging
             domain = result.get("domain", "unknown")
             
@@ -1079,7 +1208,7 @@ def fix_process_did_not_complete():
             if (result.get("error_type") == "dns_error" or
                 result.get("is_dns_error") == True or
                 (isinstance(result.get("explanation", ""), str) and "DNS" in result.get("explanation", ""))):
-                
+                    
                 logger.info(f"DNS error detected for {domain}, classifying as No Website available")
                 return "7-No Website available"
             
@@ -1087,7 +1216,6 @@ def fix_process_did_not_complete():
             if result.get("predicted_class") == "Process Did Not Complete":
                 # Check if we have Apollo data to potentially override this
                 apollo_data = result.get("apollo_data", {})
-                
                 if apollo_data and isinstance(apollo_data, dict) and any(apollo_data.values()):
                     # If already reclassified using Apollo data
                     if result.get("detection_method") == "apollo_data_classification":
@@ -1095,7 +1223,6 @@ def fix_process_did_not_complete():
                         
                         # Determine based on the new predicted_class
                         predicted_class = result.get("predicted_class", "")
-                        
                         if predicted_class == "Managed Service Provider":
                             return "1-MSP"
                         elif predicted_class == "Integrator - Commercial A/V":
@@ -1128,6 +1255,7 @@ def fix_process_did_not_complete():
         
         # Apply the patch
         final_classification.determine_final_classification = patched_determine_final_classification
+        
         logger.info("✅ Applied Process Did Not Complete classification fix")
         
     except Exception as e:
@@ -1153,6 +1281,7 @@ def setup_enhanced_monitoring():
         # Patch classify endpoint to count classifications
         try:
             from domain_classifier.api.routes import classify
+            
             if hasattr(classify, 'classify_domain'):
                 original_function = classify.classify_domain
                 
@@ -1176,29 +1305,31 @@ def setup_enhanced_monitoring():
                                 classification_counter["residential_av"] += 1
                             elif predicted_class == "Process Did Not Complete":
                                 classification_counter["process_did_not_complete"] += 1
-                            
+                                
                             # Track by condition
                             if json_data.get("is_parked", False):
                                 classification_counter["parked_domain"] += 1
-                            
+                                
                             if json_data.get("error_type") == "dns_error" or json_data.get("is_dns_error", False):
                                 classification_counter["dns_error"] += 1
-                            
+                                
                             if json_data.get("detection_method") == "apollo_data_classification":
                                 classification_counter["apollo_data_classification"] += 1
                             
                             # Periodically log stats
                             if classification_counter["total"] % 10 == 0:
                                 logger.info(f"Classification stats: {classification_counter}")
+                                
                     except Exception as e:
                         logger.warning(f"Monitoring error (non-critical): {e}")
-                    
+                        
                     return result, status_code
                 
                 # Apply monitoring wrapper
                 classify.classify_domain = monitoring_wrapper
+                
                 logger.info("✅ Enhanced monitoring applied to classify_domain endpoint")
-        
+                
         except Exception as e:
             logger.warning(f"Non-critical: Could not apply monitoring patch: {e}")
             
@@ -1218,9 +1349,9 @@ def setup_enhanced_monitoring():
                     domain = result.get("domain", "unknown")
                     result["final_classification"] = "7-No Website available"
                     result["predicted_class"] = "DNS Error"
-                    result["company_description"] = f"The domain {domain} could not be resolved. It may not exist or its DNS records may be misconfigured."
+                    result["company_description"] = f"The domain {domain} could not be resolved. It may not exist or DNS records may be misconfigured."
                     result["company_one_line"] = f"Domain cannot be reached - DNS error."
-                
+                    
                 # For Process Did Not Complete, ensure proper classification
                 elif result.get("predicted_class") == "Process Did Not Complete":
                     # Check if Apollo data allowed classification override
@@ -1233,7 +1364,7 @@ def setup_enhanced_monitoring():
                 if not result.get("confidence_score"):
                     result["confidence_score"] = 50
                     logger.warning(f"Added missing confidence_score for {result.get('domain', 'unknown')}")
-                
+                    
                 # Add default confidence scores if missing
                 if not result.get("confidence_scores"):
                     result["confidence_scores"] = {
@@ -1259,36 +1390,96 @@ def setup_enhanced_monitoring():
                 if result.get("error_type") == "dns_error" or result.get("is_dns_error") == True:
                     if "02_final_classification" in formatted:
                         formatted["02_final_classification"] = "7-No Website available"
-                    
                     if "02_classification" in formatted:
                         formatted["02_classification"] = "DNS Error"
-                    
                     if "03_description" in formatted:
-                        formatted["03_description"] = f"The domain {domain} could not be resolved. It may not exist or its DNS records may be misconfigured."
+                        formatted["03_description"] = f"The domain {domain} could not be resolved. It may not exist or DNS records may be misconfigured."
                 
                 # Ensure confidence score is in the output
                 if "01_confidence_score" not in formatted and "confidence_score" in result:
                     formatted["01_confidence_score"] = result["confidence_score"]
-                
+                    
                 return formatted
             
             # Apply the patch
             api_formatter.format_api_response = monitoring_format_wrapper
+            
             logger.info("✅ Enhanced monitoring and corrections applied to API formatter")
             
         except Exception as e:
             logger.warning(f"Non-critical: Could not apply API formatter monitoring: {e}")
-            
+        
     except Exception as e:
         logger.error(f"❌ Error setting up enhanced monitoring: {e}")
 
-# Run the patches if this module is executed directly
-if __name__ == "__main__":
-    # Configure basic logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    
-    # Apply all patches
-    apply_patches()
+def add_dns_error_interceptor():
+    """Add a DNS error interceptor at the Flask level to catch DNS errors early."""
+    try:
+        # Use Flask request processing to catch DNS errors
+        import flask
+        from flask import request, jsonify
+        
+        # Create a decorator that can be applied to route handlers
+        def dns_error_handler(app):
+            @app.before_request
+            def check_dns_before_request():
+                # Only intercept POST requests to /classify-and-enrich
+                if request.method == 'POST' and request.path == '/classify-and-enrich':
+                    try:
+                        # Extract data from request
+                        data = request.json
+                        if not data:
+                            return None
+                            
+                        input_value = data.get('url', '').strip()
+                        if not input_value:
+                            return None
+                            
+                        # Determine if input is an email
+                        is_email = '@' in input_value
+                        email = input_value if is_email else None
+                        
+                        # Extract domain
+                        domain = None
+                        if is_email:
+                            from domain_classifier.utils.domain_utils import extract_domain_from_email
+                            domain = extract_domain_from_email(input_value)
+                        else:
+                            from domain_classifier.utils.domain_utils import normalize_domain
+                            domain = normalize_domain(input_value)
+                            
+                        if not domain:
+                            return None
+                            
+                        # Create URL for checking
+                        url = f"https://{domain}"
+                        
+                        # Check for DNS resolution
+                        from domain_classifier.utils.error_handling import is_domain_worth_crawling
+                        worth_crawling, has_dns, error_msg, potentially_flaky = is_domain_worth_crawling(domain)
+                        
+                        # For DNS errors, create a response and return immediately
+                        if not has_dns and (error_msg == "dns_error" or "dns" in str(error_msg).lower()):
+                            logger.info(f"DNS error detected for {domain}, returning DNS error response")
+                            
+                            from domain_classifier.utils.error_handling import create_error_result
+                            
+                            error_result = create_error_result(
+                                domain,
+                                "dns_error",
+                                error_msg if error_msg != "dns_error" else None,
+                                email,
+                                "early_check"
+                            )
+                            error_result["website_url"] = url
+                            error_result["final_classification"] = "7-No Website available"
+                            error_result["predicted_class"] = "DNS Error"
+                            
+                            # Format the response
+                            try:
+                                from domain_classifier.utils.api_formatter import format_api_response
+                                formatted_result = format_api_response(error_result)
+                                return jsonify(formatted_result), 200
+                            except Exception as format_error:
+                                logger.error(f"Error formatting DNS error response: {format_error}")
+                                return jsonify(error_result), 200
