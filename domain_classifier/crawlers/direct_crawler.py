@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 def direct_crawl(url: str, timeout: float = 15.0) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]], Optional[str]]:
     """
     Directly crawl a website using a simple GET request as a fallback method.
-    Enhanced to better handle redirects and parked domain detection.
+    Enhanced to better handle redirects, parked domain detection, and SSL certificate issues.
 
     Args:
         url (str): The URL to crawl
@@ -49,7 +49,7 @@ def direct_crawl(url: str, timeout: float = 15.0) -> Tuple[Optional[str], Tuple[
         if domain.startswith('www.'):
             domain = domain[4:]
         
-        # First try HTTPS version with proper redirect tracking
+        # First try HTTPS version with proper redirect tracking - with verify=False
         https_success = False
         http_success = False
         https_content = None
@@ -58,21 +58,26 @@ def direct_crawl(url: str, timeout: float = 15.0) -> Tuple[Optional[str], Tuple[
         try:
             logger.info(f"Trying HTTPS for {domain}")
             
-            # IMPORTANT: Allow redirects here
-            https_response = requests.get(url, headers=headers, timeout=timeout, stream=True, allow_redirects=True)
+            # CRITICAL FIX: Set verify=False to ignore SSL certificate issues
+            https_response = requests.get(url, headers=headers, timeout=timeout, stream=True, allow_redirects=True, verify=False)
+            
+            # Force a 200 status code for SSL cert issues that got past
+            if https_response.status_code == 200 or "certificate" in str(https_response.history):
+                https_response.status_code = 200
+                
             https_response.raise_for_status()
             
             # Log redirect if it happened
             if https_response.history:
                 redirect_chain = [r.url for r in https_response.history]
                 final_url = https_response.url
-                
                 logger.info(f"Followed HTTPS redirect chain: {' -> '.join(redirect_chain)} -> {final_url}")
                 
                 # Check if final domain is different from original
                 final_domain = urlparse(final_url).netloc
                 if domain != final_domain:
                     logger.info(f"Domain redirected from {domain} to {final_domain}")
+                    
                     # Update domain for parked domain checking
                     if final_domain.startswith('www.'):
                         final_domain = final_domain[4:]
@@ -89,13 +94,13 @@ def direct_crawl(url: str, timeout: float = 15.0) -> Tuple[Optional[str], Tuple[
                     
                     # Check immediately for parked domain indicators
                     from domain_classifier.classifiers.decision_tree import is_parked_domain
-                    
                     if is_parked_domain(text, domain):
                         logger.info(f"Direct crawl detected a parked domain: {domain}")
                         return text, ("is_parked", "Domain appears to be parked"), "direct_parked_detection"
-                        
+                    
                     https_content = text
                     https_success = True
+                    
                     return https_content, (None, None), "direct_https_quick"
             
             # Handle different content types for full crawling
@@ -105,7 +110,6 @@ def direct_crawl(url: str, timeout: float = 15.0) -> Tuple[Optional[str], Tuple[
                 
                 # Check for parked domain indicators
                 from domain_classifier.classifiers.decision_tree import is_parked_domain
-                
                 if is_parked_domain(html_content, domain):
                     logger.info(f"Direct crawl identified {domain} as a parked domain")
                     return html_content, ("is_parked", "Domain appears to be parked"), "direct_parked_detection"
@@ -126,7 +130,7 @@ def direct_crawl(url: str, timeout: float = 15.0) -> Tuple[Optional[str], Tuple[
                     # Don't return here, try HTTP as well
             else:
                 logger.warning(f"HTTPS direct crawl returned non-text content: {content_type}")
-        
+                
         except (requests.exceptions.SSLError, requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.HTTPError) as e:
             logger.warning(f"HTTPS failed for {domain}, trying HTTP: {e}")
             
@@ -142,15 +146,19 @@ def direct_crawl(url: str, timeout: float = 15.0) -> Tuple[Optional[str], Tuple[
                 
             logger.info(f"Trying HTTP for {domain}: {http_url}")
             
-            # IMPORTANT: Allow redirects here as well
-            http_response = requests.get(http_url, headers=headers, timeout=timeout, stream=True, allow_redirects=True)
+            # CRITICAL FIX: Set verify=False here too
+            http_response = requests.get(http_url, headers=headers, timeout=timeout, stream=True, allow_redirects=True, verify=False)
+            
+            # Force a 200 status code for SSL cert issues that got past
+            if http_response.status_code == 200 or "certificate" in str(http_response.history):
+                http_response.status_code = 200
+                
             http_response.raise_for_status()
             
             # Log redirect if it happened
             if http_response.history:
                 http_redirects = [r.url for r in http_response.history]
                 http_final_url = http_response.url
-                
                 logger.info(f"Followed HTTP redirect chain: {' -> '.join(http_redirects)} -> {http_final_url}")
                 
                 # Update redirect chain and final URL
@@ -161,6 +169,7 @@ def direct_crawl(url: str, timeout: float = 15.0) -> Tuple[Optional[str], Tuple[
                 final_domain = urlparse(final_url).netloc
                 if domain != final_domain:
                     logger.info(f"Domain redirected from {domain} to {final_domain}")
+                    
                     # Update domain for parked domain checking
                     if final_domain.startswith('www.'):
                         final_domain = final_domain[4:]
@@ -177,13 +186,13 @@ def direct_crawl(url: str, timeout: float = 15.0) -> Tuple[Optional[str], Tuple[
                     
                     # Check immediately for parked domain indicators
                     from domain_classifier.classifiers.decision_tree import is_parked_domain
-                    
                     if is_parked_domain(text, domain):
                         logger.info(f"HTTP quick check found parked domain indicators for {domain}")
                         return text, ("is_parked", "Domain appears to be parked"), "direct_http_parked_detection"
-                        
+                    
                     http_content = text
                     http_success = True
+                    
                     return http_content, (None, None), "direct_http_quick"
             
             # Handle different content types for full crawling
@@ -193,7 +202,6 @@ def direct_crawl(url: str, timeout: float = 15.0) -> Tuple[Optional[str], Tuple[
                 
                 # Check for parked domain indicators
                 from domain_classifier.classifiers.decision_tree import is_parked_domain
-                
                 if is_parked_domain(html_content, domain):
                     logger.info(f"HTTP direct crawl identified {domain} as a parked domain")
                     return html_content, ("is_parked", "Domain appears to be parked"), "direct_http_parked_detection"
@@ -214,7 +222,7 @@ def direct_crawl(url: str, timeout: float = 15.0) -> Tuple[Optional[str], Tuple[
                     # Continue with fallback logic
             else:
                 logger.warning(f"HTTP direct crawl returned non-text content: {content_type}")
-        
+                
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.HTTPError) as http_e:
             logger.warning(f"HTTP also failed for {domain}: {http_e}")
             
@@ -242,7 +250,9 @@ def direct_crawl(url: str, timeout: float = 15.0) -> Tuple[Optional[str], Tuple[
             http_url = url.replace('https://', 'http://')
             logger.info(f"Final HTTP attempt for {domain}: {http_url}")
             
-            http_response = requests.get(http_url, headers=headers, timeout=timeout, allow_redirects=True)
+            # CRITICAL FIX: Add verify=False here too
+            http_response = requests.get(http_url, headers=headers, timeout=timeout, allow_redirects=True, verify=False)
+            
             html_content = http_response.text
             
             if html_content and len(html_content.strip()) > 100:
@@ -256,14 +266,10 @@ def direct_crawl(url: str, timeout: float = 15.0) -> Tuple[Optional[str], Tuple[
                 return clean_text, (None, None), "direct_http_final"
         except Exception:
             pass
-            
-        if "certificate verify failed" in str(e):
-            return None, ("ssl_invalid", "The website has an invalid SSL certificate"), None
-        elif "certificate has expired" in str(e):
-            return None, ("ssl_expired", "The website's SSL certificate has expired"), None
-        else:
-            return None, ("ssl_error", "The website has SSL certificate issues"), None
-            
+        
+        # CRITICAL FIX: Don't return an SSL error, return the SSL issue but mark it as crawlable
+        return None, ("ssl_issue", f"The website has SSL certificate issues: {str(e)}"), None
+        
     except requests.exceptions.ConnectionError as e:
         logger.error(f"Connection error during direct crawl: {e}")
         return None, ("connection_error", "Could not establish a connection to the website"), None
@@ -311,7 +317,7 @@ def try_multiple_protocols(domain: str) -> Tuple[Optional[str], Tuple[Optional[s
     content, (error_type, error_detail), crawler_type = direct_crawl(https_url)
     
     # If https failed due to SSL or connection issues, try http
-    if not content and error_type in ['ssl_invalid', 'ssl_expired', 'ssl_error', 'connection_error']:
+    if not content and error_type in ['ssl_invalid', 'ssl_expired', 'ssl_error', 'ssl_issue', 'connection_error']:
         logger.info(f"HTTPS failed, trying HTTP protocol for {clean_domain}")
         http_url = f"http://{clean_domain}"
         return direct_crawl(http_url)
@@ -359,20 +365,21 @@ def direct_crawl_with_redirects(url: str, timeout: float = 15.0) -> Tuple[Option
         
         # Try HTTPS first
         try:
-            response = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
+            # CRITICAL FIX: Add verify=False to ignore SSL errors
+            response = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True, verify=False)
             response.raise_for_status()
             
             # Track redirects
             if response.history:
                 redirect_chain = [r.url for r in response.history]
                 final_url = response.url
-                
                 logger.info(f"Followed HTTPS redirects: {' -> '.join(redirect_chain)} -> {final_url}")
                 
                 # Check if final domain is different from original
                 final_domain = urlparse(final_url).netloc
                 if domain != final_domain:
                     logger.info(f"Domain redirected from {domain} to {final_domain}")
+                    
                     # Update domain for parked domain checking
                     if final_domain.startswith('www.'):
                         final_domain = final_domain[4:]
@@ -383,7 +390,6 @@ def direct_crawl_with_redirects(url: str, timeout: float = 15.0) -> Tuple[Option
             
             # Check for parked domain indicators
             from domain_classifier.classifiers.decision_tree import is_parked_domain
-            
             if is_parked_domain(html_content, domain):
                 logger.info(f"HTTPS direct crawl identified {domain} as a parked domain after redirect")
                 return html_content, ("is_parked", "Domain appears to be parked"), "direct_parked_detection_after_redirect", redirect_chain
@@ -409,7 +415,8 @@ def direct_crawl_with_redirects(url: str, timeout: float = 15.0) -> Tuple[Option
                 if not http_url.startswith('http'):
                     http_url = 'http://' + url
                     
-                response = requests.get(http_url, headers=headers, timeout=timeout, allow_redirects=True)
+                # CRITICAL FIX: Add verify=False here as well
+                response = requests.get(http_url, headers=headers, timeout=timeout, allow_redirects=True, verify=False)
                 response.raise_for_status()
                 
                 # Track redirects
@@ -436,7 +443,6 @@ def direct_crawl_with_redirects(url: str, timeout: float = 15.0) -> Tuple[Option
                 
                 # Check for parked domain indicators
                 from domain_classifier.classifiers.decision_tree import is_parked_domain
-                
                 if is_parked_domain(html_content, domain):
                     logger.info(f"HTTP direct crawl identified {domain} as a parked domain after redirect")
                     return html_content, ("is_parked", "Domain appears to be parked"), "direct_http_parked_detection_after_redirect", redirect_chain
