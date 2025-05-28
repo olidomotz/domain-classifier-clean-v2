@@ -1,7 +1,8 @@
 """
 Go Crawler for domain classification.
 
-This module completely replaces all existing crawlers with a Go-based crawler.
+This module completely replaces all existing crawlers with a Go-based crawler
+and removes duplicate parked domain and SSL checks.
 """
 
 import requests
@@ -10,8 +11,9 @@ import time
 import json
 import os
 import socket
+import traceback
 from urllib.parse import urlparse
-from typing import Tuple, Optional, Dict, Any
+from typing import Tuple, Optional, Dict, Any, List
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -19,10 +21,71 @@ logger = logging.getLogger(__name__)
 # Go crawler API URL (can be overridden with environment variable)
 CRAWLER_API_URL = os.environ.get("CRAWLER_API_URL", "http://157.245.84.110:8080/scrape")
 
+# Global stats for tracking crawler usage (maintaining compatibility with original code)
+CRAWLER_STATS = {
+    "direct": 0,
+    "scrapy": 0,
+    "apify": 0,
+    "go": 0,  # Add Go crawler to statistics
+    "total": 0,
+    "last_reset": time.time()
+}
+
+def track_crawler_usage(crawler_type):
+    """Track crawler usage statistics."""
+    global CRAWLER_STATS
+    
+    # Update stats
+    CRAWLER_STATS["total"] += 1
+    
+    if "go" in crawler_type.lower():
+        CRAWLER_STATS["go"] += 1
+    elif "direct" in crawler_type.lower():
+        CRAWLER_STATS["direct"] += 1
+    elif "scrapy" in crawler_type.lower():
+        CRAWLER_STATS["scrapy"] += 1
+    elif "apify" in crawler_type.lower():
+        CRAWLER_STATS["apify"] += 1
+    
+    # Reset every 24 hours
+    if time.time() - CRAWLER_STATS["last_reset"] > 86400:
+        logger.info(f"Resetting crawler stats. Previous: {CRAWLER_STATS}")
+        old_stats = CRAWLER_STATS.copy()  # Keep old stats for logging
+        
+        CRAWLER_STATS = {
+            "direct": 0,
+            "scrapy": 0,
+            "apify": 0,
+            "go": 0,
+            "total": 0,
+            "last_reset": time.time()
+        }
+        
+        # Log a detailed summary of the previous stats
+        direct_pct = old_stats["direct"] / max(1, old_stats["total"]) * 100
+        scrapy_pct = old_stats["scrapy"] / max(1, old_stats["total"]) * 100
+        apify_pct = old_stats["apify"] / max(1, old_stats["total"]) * 100
+        go_pct = old_stats["go"] / max(1, old_stats["total"]) * 100
+        
+        logger.info(f"Crawler usage summary (past 24h): Total={old_stats['total']}")
+        logger.info(f"Direct: {old_stats['direct']} ({direct_pct:.1f}%)")
+        logger.info(f"Scrapy: {old_stats['scrapy']} ({scrapy_pct:.1f}%)")
+        logger.info(f"Apify: {old_stats['apify']} ({apify_pct:.1f}%)")
+        logger.info(f"Go: {old_stats['go']} ({go_pct:.1f}%)")
+
+    # Log current stats every 10 crawls
+    if CRAWLER_STATS["total"] % 10 == 0:
+        total = max(1, CRAWLER_STATS["total"])
+        logger.info(f"Crawler usage stats: "
+                   f"go={CRAWLER_STATS['go']} ({CRAWLER_STATS['go']/total*100:.1f}%), "
+                   f"direct={CRAWLER_STATS['direct']} ({CRAWLER_STATS['direct']/total*100:.1f}%), "
+                   f"scrapy={CRAWLER_STATS['scrapy']} ({CRAWLER_STATS['scrapy']/total*100:.1f}%), "
+                   f"apify={CRAWLER_STATS['apify']} ({CRAWLER_STATS['apify']/total*100:.1f}%)")
+
 def detect_error_type(error_message: str) -> Tuple[str, str]:
     """
     Analyze error message to determine the specific type of error.
-    This is copied from the original code to maintain compatibility.
+    This is kept from the original code to maintain compatibility.
     
     Args:
         error_message (str): The error message string
@@ -69,76 +132,6 @@ def detect_error_type(error_message: str) -> Tuple[str, str]:
     
     # Default fallback
     return "unknown_error", "An unknown error occurred while trying to access the website."
-
-def check_domain_dns(domain: str) -> Tuple[bool, Optional[str], bool]:
-    """
-    Check if a domain has valid DNS resolution.
-    This function helps maintain compatibility with the original code.
-    
-    Args:
-        domain (str): The domain to check
-    
-    Returns:
-        tuple: (has_dns, error_message, potentially_flaky)
-    """
-    try:
-        # Remove protocol if present
-        clean_domain = domain.replace('https://', '').replace('http://', '')
-        
-        # Remove path if present
-        if '/' in clean_domain:
-            clean_domain = clean_domain.split('/', 1)[0]
-        
-        logger.info(f"Checking DNS resolution for domain: {clean_domain}")
-        socket.setdefaulttimeout(3.0)  # 3 seconds max
-        
-        # Try to resolve the domain
-        socket.gethostbyname(clean_domain)
-        
-        logger.info(f"DNS resolution successful for domain: {clean_domain}")
-        return True, None, False
-        
-    except socket.gaierror as e:
-        error_code = getattr(e, 'errno', None)
-        error_str = str(e).lower()
-        
-        if error_code == -2 or "name or service not known" in error_str:
-            logger.warning(f"Domain {clean_domain} does not exist (Name not known)")
-            return False, f"The domain {domain} could not be resolved. It may not exist or DNS records may be misconfigured.", False
-        elif error_code == -3 or "temporary failure in name resolution" in error_str:
-            logger.warning(f"Domain {clean_domain} has temporary DNS issues")
-            return False, f"Temporary DNS resolution failure for {domain}. Please try again later.", True
-        else:
-            logger.warning(f"DNS resolution failed for {domain}: {e}")
-            return False, f"The domain {domain} could not be resolved. It may not exist or DNS records may be misconfigured.", False
-            
-    except socket.timeout:
-        logger.warning(f"DNS resolution timed out for {domain}")
-        return False, f"Timed out while checking {domain}. DNS resolution timed out.", False
-        
-    except Exception as e:
-        logger.error(f"Unexpected error checking domain {domain}: {e}")
-        return False, f"Error checking {domain}: {e}", False
-
-def is_domain_worth_crawling(domain: str) -> tuple:
-    """
-    Determines if a domain is worth attempting a full crawl based on preliminary checks.
-    This function helps maintain compatibility with the original code.
-    
-    Args:
-        domain (str): The domain to check
-    
-    Returns:
-        tuple: (worth_crawling, has_dns, error_msg, potentially_flaky)
-    """
-    has_dns, error_msg, potentially_flaky = check_domain_dns(domain)
-    
-    # Special handling for DNS errors
-    if not has_dns:
-        logger.info(f"Domain {domain} has DNS resolution issues: {error_msg}")
-        return False, False, "dns_error", False
-    
-    return True, has_dns, error_msg, potentially_flaky
 
 def go_crawl(url: str, timeout: int = 30) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]]]:
     """
@@ -194,7 +187,10 @@ def go_crawl(url: str, timeout: int = 30) -> Tuple[Optional[str], Tuple[Optional
                 if data.get('success', False) is False:
                     error_message = data.get('error', 'Unknown error')
                     logger.warning(f"Go crawler returned error for {domain}: {error_message}")
-                    return None, ("go_crawler_error", error_message)
+                    
+                    # Map error type if provided
+                    error_type = data.get('error_type', "go_crawler_error")
+                    return None, (error_type, error_message)
                 
                 # Extract content
                 content = data.get('content', '')
@@ -203,10 +199,16 @@ def go_crawl(url: str, timeout: int = 30) -> Tuple[Optional[str], Tuple[Optional
                 pages_crawled = data.get('pages_crawled', 0)
                 word_count = data.get('word_count', 0)
                 
-                # Check for empty content
+                # Handle empty content
                 if not content or (isinstance(content, str) and len(content.strip()) == 0):
                     logger.warning(f"Go crawler returned empty content for {domain}")
                     return None, ("empty_content", "The website returned no content")
+                
+                # Check for parked domains in the crawler result
+                is_parked = data.get('is_parked', False)
+                if is_parked:
+                    logger.info(f"Go crawler detected parked domain: {domain}")
+                    return None, ("is_parked", "Domain appears to be parked based on Go crawler analysis"), 
                 
                 # Log success
                 logger.info(f"Go crawler successful for {domain}: {pages_crawled} pages, {word_count} words, {len(content)} chars")
@@ -254,20 +256,23 @@ def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optiona
     try:
         logger.info(f"Starting crawl for {url} with Go crawler")
         
-        # Parse domain for later use
+        # Parse domain for DNS check
         domain = urlparse(url).netloc
         if domain.startswith('www.'):
             domain = domain[4:]
         
-        # Quick DNS check before attempting crawl
+        # Minimal DNS check - we still need this to avoid wasting API calls on non-existent domains
         try:
             socket.gethostbyname(domain)
         except socket.gaierror:
             logger.warning(f"Domain {domain} does not resolve - DNS error")
             return None, ("dns_error", "This domain does not exist or cannot be resolved"), "go_dns_check"
         
-        # Call the Go crawler
+        # Call the Go crawler - all other checks (SSL, parked domains, etc.) are handled by the Go crawler
         content, (error_type, error_detail) = go_crawl(url)
+        
+        # Track the usage
+        track_crawler_usage("go")
         
         # Check the result
         if content:
@@ -279,5 +284,55 @@ def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optiona
             
     except Exception as e:
         logger.error(f"Error in crawl_website: {e}")
+        logger.error(traceback.format_exc())
         error_type, error_detail = detect_error_type(str(e))
         return None, (error_type, error_detail), "go_exception"
+
+# Required for compatibility with the original module
+def quick_parked_check(url: str) -> Tuple[bool, Optional[str]]:
+    """
+    Perform a quick check to see if a domain is likely parked.
+    This is a stub that delegates to the Go crawler and is kept for compatibility.
+    """
+    # Extract domain for API call
+    domain = urlparse(url).netloc
+    if domain.startswith('www.'):
+        domain = domain[4:]
+        
+    logger.info(f"Delegating parked domain check for {domain} to Go crawler")
+    
+    # Call the Go crawler with a quick timeout
+    try:
+        content, (error_type, error_detail) = go_crawl(url, timeout=10)
+        
+        # If the Go crawler identifies it as a parked domain
+        if error_type == "is_parked":
+            return True, error_detail
+            
+        # If we got content, it's not parked
+        if content:
+            return False, content
+            
+        # If we got an error but not a parked domain error, it's not confirmed parked
+        return False, None
+        
+    except Exception as e:
+        logger.warning(f"Error in parked domain check: {e}")
+        return False, None
+
+# Compatibility functions - stubs that just use Go crawler
+def apify_crawl(url: str, timeout: int = 30) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]]]:
+    """
+    Compatibility function for apify_crawl. Uses Go crawler instead.
+    """
+    logger.info(f"Using Go crawler instead of Apify for {url}")
+    return go_crawl(url, timeout)
+
+# Required to maintain compatibility with original code
+def scrapy_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]]]:
+    """
+    Compatibility function that redirects to Go crawler.
+    This allows importing this function from other modules.
+    """
+    logger.info(f"Using Go crawler instead of Scrapy for {url}")
+    return go_crawl(url)
