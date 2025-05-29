@@ -1,4 +1,7 @@
-"""Error handling utilities for domain classification."""
+"""Error handling utilities for domain classification.
+
+Enhanced to work seamlessly with the Go crawler implementation.
+"""
 
 import logging
 import socket
@@ -7,6 +10,7 @@ from requests.exceptions import RequestException, Timeout, ConnectionError
 from typing import Dict, Any, Tuple, Optional
 from urllib.parse import urlparse
 import re
+import time
 
 # Import final classification utility (if we can - use try/except to avoid circular imports)
 try:
@@ -37,10 +41,10 @@ logger = logging.getLogger(__name__)
 def detect_error_type(error_message: str) -> Tuple[str, str]:
     """
     Analyze error message to determine the specific type of error.
-
+    
     Args:
         error_message (str): The error message string
-
+    
     Returns:
         tuple: (error_type, detailed_message)
     """
@@ -58,7 +62,7 @@ def detect_error_type(error_message: str) -> Tuple[str, str]:
             return "ssl_invalid", "The website has an invalid SSL certificate."
         else:
             return "ssl_error", "The website has SSL certificate issues."
-            
+    
     # DNS resolution errors
     elif any(phrase in error_message for phrase in ['getaddrinfo failed', 'name or service not known', 'no such host']):
         return "dns_error", "The domain could not be resolved. It may not exist or DNS records may be misconfigured."
@@ -70,6 +74,7 @@ def detect_error_type(error_message: str) -> Tuple[str, str]:
     # 4XX HTTP errors
     elif any(phrase in error_message for phrase in ['403', 'forbidden', '401', 'unauthorized']):
         return "access_denied", "Access to the website was denied. The site may be blocking automated access."
+    
     elif '404' in error_message or 'not found' in error_message:
         return "not_found", "The requested page was not found on this website."
         
@@ -86,20 +91,18 @@ def detect_error_type(error_message: str) -> Tuple[str, str]:
 
 def check_domain_dns(domain: str) -> Tuple[bool, Optional[str], bool]:
     """
+    Enhanced DNS check that works with Go crawler.
     Check if a domain has valid DNS resolution AND can respond to a basic HTTP request.
     Also detects potentially flaky sites that may fail during crawling.
     
-    Enhanced to better detect non-existent domains and invalid TLDs.
-    Fixed to handle SSL certificate issues properly.
-
     Args:
         domain (str): The domain to check
-
+        
     Returns:
         tuple: (has_dns, error_message, potentially_flaky)
-        - has_dns: Whether the domain has DNS resolution
-        - error_message: Error message if DNS resolution failed
-        - potentially_flaky: Whether the site shows signs of being flaky
+            - has_dns: Whether the domain has DNS resolution
+            - error_message: Error message if DNS resolution failed
+            - potentially_flaky: Whether the site shows signs of being flaky
     """
     potentially_flaky = False
     
@@ -110,10 +113,10 @@ def check_domain_dns(domain: str) -> Tuple[bool, Optional[str], bool]:
         # Remove path if present
         if '/' in clean_domain:
             clean_domain = clean_domain.split('/', 1)[0]
-            
+        
         # Check if TLD is valid - very basic check for common TLDs
-        valid_tlds = ['.com', '.net', '.org', '.io', '.co', '.edu', '.gov', '.info', '.biz', 
-                     '.ai', '.app', '.dev', '.me', '.tech', '.us', '.uk', '.ca', '.au', '.de', 
+        valid_tlds = ['.com', '.net', '.org', '.io', '.co', '.edu', '.gov', '.info', '.biz',
+                     '.ai', '.app', '.dev', '.me', '.tech', '.us', '.uk', '.ca', '.au', '.de',
                      '.fr', '.jp', '.cn', '.ru', '.br', '.it', '.nl', '.es', '.sg', '.in']
         
         domain_parts = clean_domain.split('.')
@@ -162,183 +165,181 @@ def check_domain_dns(domain: str) -> Tuple[bool, Optional[str], bool]:
             except Exception as https_error:
                 # Try HTTP as a fallback
                 logger.warning(f"HTTPS failed for {clean_domain}, trying HTTP: {https_error}")
-            
-            # Step 2: Try to establish a reliable HTTP connection
-            try:
-                logger.info(f"Attempting HTTP connection check for {clean_domain}")
-                session = requests.Session()
                 
-                # Try HTTPS first - with verify=False
-                success = False
-                remote_disconnect_https = False
-                https_ssl_error = False
-                
+                # Step 2: Try to establish a reliable HTTP connection
                 try:
-                    url = f"https://{clean_domain}"
-                    response = session.get(
-                        url,
-                        timeout=5.0,
-                        headers={
-                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-                            'Accept-Language': 'en-US,en;q=0.9',
-                            'Accept-Encoding': 'gzip, deflate, br',
-                            'Connection': 'keep-alive',
-                            'Cache-Control': 'max-age=0',
-                            'Upgrade-Insecure-Requests': '1'
-                        },
-                        stream=True,
-                        allow_redirects=True,
-                        verify=False  # CRITICAL FIX: Ignore SSL certificate issues
-                    )
+                    logger.info(f"Attempting HTTP connection check for {clean_domain}")
+                    session = requests.Session()
                     
-                    # CRITICAL: Actually try to read a chunk of content
-                    # This is what will detect connection issues with problematic sites
+                    # Try HTTPS first - with verify=False
+                    success = False
+                    remote_disconnect_https = False
+                    https_ssl_error = False
+                    
                     try:
-                        chunk = next(response.iter_content(1024), None)
-                        if chunk:
-                            # Quick check for parked domain in this first chunk
-                            from domain_classifier.classifiers.decision_tree import is_parked_domain
-                            
-                            chunk_text = chunk.decode('utf-8', errors='ignore')
-                            if is_parked_domain(chunk_text, clean_domain):
-                                logger.info(f"Domain {clean_domain} appears to be a parked domain based on initial content")
-                                return True, "parked_domain", False
+                        url = f"https://{clean_domain}"
+                        response = session.get(
+                            url,
+                            timeout=5.0,
+                            headers={
+                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+                                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                                'Accept-Language': 'en-US,en;q=0.9',
+                                'Accept-Encoding': 'gzip, deflate, br',
+                                'Connection': 'keep-alive',
+                                'Cache-Control': 'max-age=0',
+                                'Upgrade-Insecure-Requests': '1'
+                            },
+                            stream=True,
+                            allow_redirects=True,
+                            verify=False  # CRITICAL FIX: Ignore SSL certificate issues
+                        )
+                        
+                        # CRITICAL: Actually try to read a chunk of content
+                        # This is what will detect connection issues with problematic sites
+                        try:
+                            chunk = next(response.iter_content(1024), None)
+                            if chunk:
+                                # Quick check for parked domain in this first chunk
+                                from domain_classifier.classifiers.decision_tree import is_parked_domain
+                                chunk_text = chunk.decode('utf-8', errors='ignore')
+                                if is_parked_domain(chunk_text, clean_domain):
+                                    logger.info(f"Domain {clean_domain} appears to be a parked domain based on initial content")
+                                    return True, "parked_domain", False
+                                    
+                                success = True
+                                logger.info(f"Successfully read content chunk from {clean_domain}")
+                            else:
+                                potentially_flaky = True
+                                logger.warning(f"No content received from {clean_domain}")
+                        except Exception as read_error:
+                            logger.warning(f"Error reading content from {clean_domain}: {read_error}")
+                            if "RemoteDisconnected" in str(read_error) or "ConnectionResetError" in str(read_error):
+                                remote_disconnect_https = True
+                                logger.info(f"Detected remote disconnect during content read for {clean_domain}")
+                                potentially_flaky = True
                                 
-                            success = True
-                            logger.info(f"Successfully read content chunk from {clean_domain}")
-                        else:
+                        response.close()
+                        
+                        if success:
+                            return True, None, False
+                            
+                    except requests.exceptions.SSLError as https_e:
+                        logger.warning(f"HTTPS failed for {clean_domain} even with verify=False, trying HTTP: {https_e}")
+                        # Mark SSL error for special handling
+                        https_ssl_error = True
+                        
+                        # Look for reset indicators
+                        if "RemoteDisconnected" in str(https_e) or "ConnectionResetError" in str(https_e) or "reset by peer" in str(https_e) or "connection aborted" in str(https_e).lower():
                             potentially_flaky = True
-                            logger.warning(f"No content received from {clean_domain}")
-                    except Exception as read_error:
-                        logger.warning(f"Error reading content from {clean_domain}: {read_error}")
-                        if "RemoteDisconnected" in str(read_error) or "ConnectionResetError" in str(read_error):
                             remote_disconnect_https = True
-                            logger.info(f"Detected remote disconnect during content read for {clean_domain}")
-                            potentially_flaky = True
+                            logger.info(f"Detected potential anti-scraping protection on HTTPS for {clean_domain}")
                             
-                    response.close()
-                    
-                    if success:
-                        return True, None, False
-                        
-                except requests.exceptions.SSLError as https_e:
-                    logger.warning(f"HTTPS failed for {clean_domain} even with verify=False, trying HTTP: {https_e}")
-                    
-                    # Mark SSL error for special handling
-                    https_ssl_error = True
-                    
-                    # Look for reset indicators
-                    if "RemoteDisconnected" in str(https_e) or "ConnectionResetError" in str(https_e) or "reset by peer" in str(https_e) or "connection aborted" in str(https_e).lower():
+                    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as https_e:
+                        logger.warning(f"HTTPS connection failed for {clean_domain}: {https_e}")
                         potentially_flaky = True
-                        remote_disconnect_https = True
-                        logger.info(f"Detected potential anti-scraping protection on HTTPS for {clean_domain}")
-                        
-                except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as https_e:
-                    logger.warning(f"HTTPS connection failed for {clean_domain}: {https_e}")
-                    potentially_flaky = True
-                
-                # Try HTTP as fallback
-                remote_disconnect_http = False
-                http_success = False
-                
-                try:
-                    url = f"http://{clean_domain}"
-                    response = session.get(
-                        url,
-                        timeout=5.0,
-                        headers={
-                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-                            'Accept-Language': 'en-US,en;q=0.9',
-                            'Accept-Encoding': 'gzip, deflate, br',
-                            'Connection': 'keep-alive',
-                            'Cache-Control': 'max-age=0',
-                            'Upgrade-Insecure-Requests': '1'
-                        },
-                        stream=True,
-                        allow_redirects=True
-                    )
                     
-                    # CRITICAL: Actually try to read a chunk of content
+                    # Try HTTP as fallback
+                    remote_disconnect_http = False
+                    http_success = False
+                    
                     try:
-                        chunk = next(response.iter_content(1024), None)
-                        if chunk:
-                            # Quick check for parked domain in this first chunk
-                            from domain_classifier.classifiers.decision_tree import is_parked_domain
-                            
-                            chunk_text = chunk.decode('utf-8', errors='ignore')
-                            if is_parked_domain(chunk_text, clean_domain):
-                                logger.info(f"Domain {clean_domain} appears to be a parked domain based on HTTP content")
-                                return True, "parked_domain", False
+                        url = f"http://{clean_domain}"
+                        response = session.get(
+                            url,
+                            timeout=5.0,
+                            headers={
+                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+                                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                                'Accept-Language': 'en-US,en;q=0.9',
+                                'Accept-Encoding': 'gzip, deflate, br',
+                                'Connection': 'keep-alive',
+                                'Cache-Control': 'max-age=0',
+                                'Upgrade-Insecure-Requests': '1'
+                            },
+                            stream=True,
+                            allow_redirects=True
+                        )
+                        
+                        # CRITICAL: Actually try to read a chunk of content
+                        try:
+                            chunk = next(response.iter_content(1024), None)
+                            if chunk:
+                                # Quick check for parked domain in this first chunk
+                                from domain_classifier.classifiers.decision_tree import is_parked_domain
+                                chunk_text = chunk.decode('utf-8', errors='ignore')
+                                if is_parked_domain(chunk_text, clean_domain):
+                                    logger.info(f"Domain {clean_domain} appears to be a parked domain based on HTTP content")
+                                    return True, "parked_domain", False
                                 
-                            http_success = True
-                            logger.info(f"Successfully read content chunk from {clean_domain} (HTTP)")
-                            
+                                http_success = True
+                                logger.info(f"Successfully read content chunk from {clean_domain} (HTTP)")
+                                
+                                # CRITICAL CHANGE: If HTTPS failed with SSL but HTTP works, signal it
+                                if https_ssl_error:
+                                    return True, "http_success_https_failed", False
+                                
+                                return True, None, False
+                            else:
+                                potentially_flaky = True
+                                logger.warning(f"No content received from {clean_domain} (HTTP)")
+                                
+                        except Exception as read_error:
+                            logger.warning(f"Error reading content from {clean_domain} (HTTP): {read_error}")
+                            if "RemoteDisconnected" in str(read_error) or "ConnectionResetError" in str(read_error):
+                                remote_disconnect_http = True
+                                logger.info(f"Detected remote disconnect during content read for {clean_domain} (HTTP)")
+                                potentially_flaky = True
+                                
+                        response.close()
+                        
+                        if http_success:
                             # CRITICAL CHANGE: If HTTPS failed with SSL but HTTP works, signal it
                             if https_ssl_error:
                                 return True, "http_success_https_failed", False
-                                
+                            
                             return True, None, False
-                        else:
-                            potentially_flaky = True
-                            logger.warning(f"No content received from {clean_domain} (HTTP)")
-                    except Exception as read_error:
-                        logger.warning(f"Error reading content from {clean_domain} (HTTP): {read_error}")
-                        if "RemoteDisconnected" in str(read_error) or "ConnectionResetError" in str(read_error):
-                            remote_disconnect_http = True
-                            logger.info(f"Detected remote disconnect during content read for {clean_domain} (HTTP)")
-                            potentially_flaky = True
                             
-                    response.close()
-                    
-                    if http_success:
-                        # CRITICAL CHANGE: If HTTPS failed with SSL but HTTP works, signal it
-                        if https_ssl_error:
-                            return True, "http_success_https_failed", False
-                            
-                        return True, None, False
+                    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.HTTPError) as http_e:
+                        logger.warning(f"HTTP also failed for {clean_domain}: {http_e}")
                         
-                except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.HTTPError) as http_e:
-                    logger.warning(f"HTTP also failed for {clean_domain}: {http_e}")
+                        # Look for reset indicators
+                        if "RemoteDisconnected" in str(http_e) or "ConnectionResetError" in str(http_e) or "reset by peer" in str(http_e) or "connection aborted" in str(http_e).lower():
+                            potentially_flaky = True
+                            remote_disconnect_http = True
+                            logger.info(f"Detected potential anti-scraping protection on HTTP for {clean_domain}")
                     
-                    # Look for reset indicators
-                    if "RemoteDisconnected" in str(http_e) or "ConnectionResetError" in str(http_e) or "reset by peer" in str(http_e) or "connection aborted" in str(http_e).lower():
+                    # CRITICAL CHANGE: If either HTTP or HTTPS were closed by remote end, this is likely
+                    # anti-scraping protection - mark it as needing advanced crawling
+                    if remote_disconnect_https or remote_disconnect_http:
+                        logger.warning(f"Domain {clean_domain} appears to be using anti-scraping protection - will attempt advanced crawlers")
+                        return True, "anti_scraping_protection", True
+                    
+                    # CRITICAL FIX: If HTTPS failed with SSL errors, we should return that instead of a generic error
+                    if https_ssl_error:
+                        logger.warning(f"Domain {clean_domain} has SSL certificate issues, but DNS works")
+                        return True, "ssl_error", potentially_flaky
+                    
+                    # If it failed with both HTTPS and HTTP, it's not usable
+                    error_message = f"The domain {domain} resolves but the web server is not responding properly. The server might be misconfigured or blocking requests."
+                    return False, error_message, potentially_flaky
+                    
+                except Exception as conn_e:
+                    logger.warning(f"Connection error for {clean_domain}: {conn_e}")
+                    
+                    # Check for specific flaky indicators
+                    if "RemoteDisconnected" in str(conn_e) or "ConnectionResetError" in str(conn_e) or "reset by peer" in str(conn_e) or "connection aborted" in str(conn_e).lower():
                         potentially_flaky = True
-                        remote_disconnect_http = True
-                        logger.info(f"Detected potential anti-scraping protection on HTTP for {clean_domain}")
-                
-                # CRITICAL CHANGE: If either HTTP or HTTPS were closed by remote end, this is likely
-                # anti-scraping protection - mark it as needing advanced crawling
-                if remote_disconnect_https or remote_disconnect_http:
-                    logger.warning(f"Domain {clean_domain} appears to be using anti-scraping protection - will attempt advanced crawlers")
-                    return True, "anti_scraping_protection", True
-                
-                # CRITICAL FIX: If HTTPS failed with SSL errors, we should return that instead of a generic error
-                if https_ssl_error:
-                    logger.warning(f"Domain {clean_domain} has SSL certificate issues, but DNS works")
-                    return True, "ssl_error", potentially_flaky
-                
-                # If it failed with both HTTPS and HTTP, it's not usable
-                error_message = f"The domain {domain} resolves but the web server is not responding properly. The server might be misconfigured or blocking requests."
-                return False, error_message, potentially_flaky
-                
-            except Exception as conn_e:
-                logger.warning(f"Connection error for {clean_domain}: {conn_e}")
-                
-                # Check for specific flaky indicators
-                if "RemoteDisconnected" in str(conn_e) or "ConnectionResetError" in str(conn_e) or "reset by peer" in str(conn_e) or "connection aborted" in str(conn_e).lower():
-                    potentially_flaky = True
-                    logger.warning(f"Domain {clean_domain} appears to be using anti-scraping protection - will attempt advanced crawlers")
-                    return True, "anti_scraping_protection", True
-                
-                # CRITICAL FIX: Check for SSL certificate error messages
-                if "certificate" in str(conn_e).lower() or "ssl" in str(conn_e).lower():
-                    logger.warning(f"Domain {clean_domain} has SSL certificate issues, but DNS works")
-                    return True, "ssl_error", potentially_flaky
+                        logger.warning(f"Domain {clean_domain} appears to be using anti-scraping protection - will attempt advanced crawlers")
+                        return True, "anti_scraping_protection", True
                     
-                return False, f"The domain {domain} resolves but cannot be connected to. The server might be down or blocking connections.", potentially_flaky
-                
+                    # CRITICAL FIX: Check for SSL certificate error messages
+                    if "certificate" in str(conn_e).lower() or "ssl" in str(conn_e).lower():
+                        logger.warning(f"Domain {clean_domain} has SSL certificate issues, but DNS works")
+                        return True, "ssl_error", potentially_flaky
+                    
+                    return False, f"The domain {domain} resolves but cannot be connected to. The server might be down or blocking connections.", potentially_flaky
+                    
         except socket.gaierror as e:
             # Detailed error handling for different DNS error codes
             error_code = getattr(e, 'errno', None)
@@ -352,12 +353,15 @@ def check_domain_dns(domain: str) -> Tuple[bool, Optional[str], bool]:
             if error_code == -2 or "name or service not known" in error_str:
                 logger.warning(f"Domain {clean_domain} does not exist (Name not known)")
                 return False, f"The domain {domain} could not be resolved. It may not exist or DNS records may be misconfigured.", False
+                
             elif error_code == -3 or "temporary failure in name resolution" in error_str:
                 logger.warning(f"Domain {clean_domain} has temporary DNS issues")
                 return False, f"Temporary DNS resolution failure for {domain}. Please try again later.", True
+                
             elif error_code == -5 or "no address associated" in error_str:
                 logger.warning(f"Domain {clean_domain} has no DNS records")
                 return False, f"The domain {domain} has no DNS A records.", False
+                
             else:
                 logger.warning(f"DNS resolution failed for {domain}: {e}")
                 return False, f"The domain {domain} could not be resolved. It may not exist or DNS records may be misconfigured.", False
@@ -366,6 +370,10 @@ def check_domain_dns(domain: str) -> Tuple[bool, Optional[str], bool]:
             logger.warning(f"DNS resolution timed out for {domain}: {e}")
             return False, f"Timed out while checking {domain}. Domain may not exist or the server is not responding.", False
             
+        except Exception as e:
+            logger.error(f"Unexpected error checking domain {domain}: {e}")
+            return False, f"Error checking {domain}: {e}", False
+            
     except Exception as e:
         logger.error(f"Unexpected error checking domain {domain}: {e}")
         return False, f"Error checking {domain}: {e}", False
@@ -373,11 +381,11 @@ def check_domain_dns(domain: str) -> Tuple[bool, Optional[str], bool]:
 def is_domain_worth_crawling(domain: str) -> tuple:
     """
     Determines if a domain is worth attempting a full crawl based on preliminary checks.
-    Fixed to properly handle SSL certificate issues.
-
+    Enhanced to work with the Go crawler for proper classification.
+    
     Args:
         domain (str): The domain to check
-
+    
     Returns:
         tuple: (worth_crawling, has_dns, error_msg, potentially_flaky)
     """
@@ -393,7 +401,7 @@ def is_domain_worth_crawling(domain: str) -> tuple:
         logger.info(f"Domain {domain} has SSL certificate issues: {error_msg}")
         # We should still crawl these domains, but note they have SSL issues
         return True, True, "ssl_error", potentially_flaky
-        
+    
     # CRITICAL FIX: Also check for "certificate verify failed" which might not have "SSL" in the message
     if error_msg and "certificate" in error_msg.lower():
         logger.info(f"Domain {domain} has certificate verification issues: {error_msg}")
@@ -425,18 +433,19 @@ def is_domain_worth_crawling(domain: str) -> tuple:
     return True, has_dns, error_msg, potentially_flaky
 
 def create_error_result(domain: str, error_type: Optional[str] = None, 
-                      error_detail: Optional[str] = None, email: Optional[str] = None,
-                      crawler_type: Optional[str] = None) -> Dict[str, Any]:
+                        error_detail: Optional[str] = None, email: Optional[str] = None,
+                        crawler_type: Optional[str] = None) -> Dict[str, Any]:
     """
     Create a standardized error response based on the error type.
-
+    Enhanced to work properly with Go crawler error types.
+    
     Args:
         domain (str): The domain being processed
         error_type (str, optional): The type of error detected
         error_detail (str, optional): Detailed explanation of the error
         email (str, optional): Email address if processing an email
         crawler_type (str, optional): The type of crawler used/attempted
-
+        
     Returns:
         dict: Standardized error response
     """
@@ -459,7 +468,7 @@ def create_error_result(domain: str, error_type: Optional[str] = None,
     # Add email if provided
     if email:
         error_result["email"] = email
-        
+    
     # Add error_type if provided
     if error_type:
         error_result["error_type"] = error_type
@@ -472,42 +481,51 @@ def create_error_result(domain: str, error_type: Optional[str] = None,
         if error_type == 'anti_scraping':
             explanation = f"We couldn't analyze {domain} because the website appears to be using anti-scraping protection that prevents automated access. Our system will try more advanced techniques to extract the content and will attempt enrichment from external sources regardless."
             error_result["is_anti_scraping"] = True
+            
         elif error_type.startswith('ssl_'):
             explanation = f"We couldn't analyze {domain} because of SSL certificate issues. "
+            
             if error_type == 'ssl_expired':
                 explanation += f"The website's SSL certificate has expired. This is a security issue with the target website, not our classification service."
             elif error_type == 'ssl_invalid':
                 explanation += f"The website has an invalid SSL certificate. This is a security issue with the target website, not our classification service."
             else:
                 explanation += f"This is a security issue with the target website, not our classification service."
+                
             error_result["is_ssl_error"] = True
-            
             # CRITICAL FIX: For SSL errors, set a special predicted_class
             error_result["predicted_class"] = "SSL Error"
+            
         elif error_type == 'dns_error':
             explanation = f"We couldn't analyze {domain} because the domain could not be resolved. This typically means the domain doesn't exist or its DNS records are misconfigured."
             error_result["is_dns_error"] = True
-            
             # CRITICAL: Set the predicted_class to "DNS Error" for better visibility
             error_result["predicted_class"] = "DNS Error"
+            
         elif error_type == 'connection_error':
             explanation = f"We couldn't analyze {domain} because a connection couldn't be established. The website may be down, temporarily unavailable, or blocking our requests. We will still attempt to enrich the domain from external sources."
             error_result["is_connection_error"] = True
+            
         elif error_type == 'access_denied':
             explanation = f"We couldn't analyze {domain} because access was denied (403 Forbidden). The website may be blocking automated access or requiring authentication. We will still attempt to enrich the domain from external sources."
             error_result["is_access_denied"] = True
+            
         elif error_type == 'not_found':
             explanation = f"We couldn't analyze {domain} because the main page was not found. The website may be under construction or have moved to a different URL. We will still attempt to enrich the domain from external sources."
             error_result["is_not_found"] = True
+            
         elif error_type == 'server_error':
             explanation = f"We couldn't analyze {domain} because the website is experiencing server errors. This is an issue with the target website, not our classification service. We will still attempt to enrich the domain from external sources."
             error_result["is_server_error"] = True
+            
         elif error_type == 'robots_restricted':
             explanation = f"We couldn't analyze {domain} because the website restricts automated access. This is a policy set by the website owner. We will still attempt to enrich the domain from external sources."
             error_result["is_robots_restricted"] = True
+            
         elif error_type == 'timeout':
             explanation = f"We couldn't analyze {domain} because the website took too long to respond. The website may be experiencing performance issues or temporarily unavailable. We will still attempt to enrich the domain from external sources."
             error_result["is_timeout"] = True
+            
         elif error_type == 'is_parked' or error_type == 'parked_domain':
             explanation = f"The domain {domain} appears to be parked or inactive. This domain may be registered but not actively in use for a business."
             error_result["is_parked"] = True
