@@ -119,12 +119,48 @@ def register_enrich_routes(app, snowflake_conn):
         except Exception as e:
             logger.error(f"Error storing classification for {domain}: {str(e)}")
         
+        # NEW CODE: Store data in N8N_DOMAIN_CONTENT table
+        n8n_content_stored = False
+        try:
+            # Get values from the request
+            pages_crawled = crawl_stats.get('pages_crawled', 0)
+            word_count = crawl_stats.get('word_count', 0)
+            crawler_type = 'go_crawler'  # Default value
+            
+            # Connect to Snowflake and insert data
+            cursor = snowflake_conn.conn.cursor()
+            
+            # Insert data into N8N_DOMAIN_CONTENT table
+            query = """
+            INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.N8N_DOMAIN_CONTENT 
+            (DOMAIN, CONTENT, CRAWLER_TYPE, PAGES_CRAWLED, WORD_COUNT)
+            VALUES (%s, %s, %s, %s, %s)
+            """
+            
+            cursor.execute(query, (
+                domain,
+                content,
+                crawler_type,
+                pages_crawled,
+                word_count
+            ))
+            
+            # Commit the transaction
+            snowflake_conn.conn.commit()
+            
+            n8n_content_stored = True
+            logger.info(f"Saved data to N8N_DOMAIN_CONTENT table for {domain}")
+            
+        except Exception as e:
+            logger.error(f"Error storing data in N8N_DOMAIN_CONTENT table for {domain}: {str(e)}")
+        
         return jsonify({
             "success": content_stored and classification_stored,
             "message": "Data processed for Snowflake storage",
             "domain": domain,
             "content_stored": content_stored,
-            "classification_stored": classification_stored
+            "classification_stored": classification_stored,
+            "n8n_content_stored": n8n_content_stored  # Add flag for new table
         })
 
     @app.route('/classify-and-enrich', methods=['POST', 'OPTIONS'])
