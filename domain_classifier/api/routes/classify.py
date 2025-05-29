@@ -222,7 +222,6 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
             # Try to get content (either from DB or by crawling)
             content = None
             
-            # If reclassifying AND using existing content is explicitly true, try to get existing content first
             # CRITICAL FIX: Only check existing content if use_existing_content is True
             if use_existing_content:
                 try:
@@ -258,16 +257,24 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                 except Exception as e:
                     logger.warning(f"Could not get existing content, will crawl instead: {e}")
                     content = None
+            else:
+                logger.info(f"Skipping existing content check as use_existing_content=False")
                     
             # If we specifically requested to use existing content but none was found
             if use_existing_content and not content:
                 # CRITICAL FIX: Don't return a 404 error, continue with crawling
                 logger.warning(f"No existing content found for {domain}, will attempt to crawl")
             
-            # If no content yet, crawl the website
+            # Initialize error_type and error_detail
             error_type = None
             error_detail = None
+            crawler_type = None
             
+            # Initialize special_case_enhancements
+            # CRITICAL FIX: Initialize this variable to prevent UnboundLocalError
+            special_case_enhancements = {}
+            
+            # If no content yet, crawl the website
             if not content:
                 # CRITICAL CHANGE: Make sure we log this clearly
                 logger.info(f"Crawling website for {domain} because no content was found or use_existing_content=False")
