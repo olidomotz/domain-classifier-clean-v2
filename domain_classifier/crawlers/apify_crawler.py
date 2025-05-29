@@ -1,5 +1,5 @@
 """
-Go Crawler for domain classification with enhanced logging.
+Go Crawler for domain classification with increased timeout.
 
 This module replaces all existing crawlers with a Go-based crawler
 while maintaining compatibility with the rest of the system.
@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 # Go crawler API URL (can be overridden with environment variable)
 CRAWLER_API_URL = os.environ.get("CRAWLER_API_URL", "http://157.245.84.110:8080/scrape")
 logger.info(f"Go crawler API URL: {CRAWLER_API_URL}")  # Log the URL being used
+
+# CRITICAL: Increase default timeouts
+DEFAULT_TIMEOUT = 60  # Increased from 30 to 60 seconds
+QUICK_CHECK_TIMEOUT = 20  # Increased from 10 to 20 seconds
 
 # Global stats for tracking crawler usage (maintaining compatibility with original code)
 CRAWLER_STATS = {
@@ -134,13 +138,13 @@ def detect_error_type(error_message: str) -> Tuple[str, str]:
     # Default fallback
     return "unknown_error", "An unknown error occurred while trying to access the website."
 
-def go_crawl(url: str, timeout: int = 30) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]]]:
+def go_crawl(url: str, timeout: int = DEFAULT_TIMEOUT) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]]]:
     """
-    Crawl a website using the Go-based crawler.
+    Crawl a website using the Go-based crawler with increased timeout.
     
     Args:
         url (str): The URL to crawl
-        timeout (int, optional): Request timeout in seconds. Defaults to 30.
+        timeout (int, optional): Request timeout in seconds. Defaults to DEFAULT_TIMEOUT (60 seconds).
     
     Returns:
         tuple: (content, (error_type, error_detail))
@@ -149,7 +153,7 @@ def go_crawl(url: str, timeout: int = 30) -> Tuple[Optional[str], Tuple[Optional
         - error_detail: Detailed error message if failed, None if successful
     """
     try:
-        logger.info(f"Starting Go crawler for {url}")
+        logger.info(f"Starting Go crawler for {url} with {timeout}s timeout")
         track_crawler_usage("go_started")
         
         # Extract domain for API call
@@ -185,6 +189,9 @@ def go_crawl(url: str, timeout: int = 30) -> Tuple[Optional[str], Tuple[Optional
         start_time = time.time()
         
         try:
+            # CRITICAL: Add logging for timeout value
+            logger.info(f"Making request with {timeout}s timeout")
+            
             response = session.post(
                 CRAWLER_API_URL, 
                 json=payload, 
@@ -303,7 +310,7 @@ def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optiona
         - content: The crawled content or None if failed
         - error_type: Type of error if failed, None if successful
         - error_detail: Detailed error message if failed, None if successful
-        - crawler_type: The type of crawler used (always "go" in this case)
+        - crawler_type: The type of crawler used
     """
     try:
         # CRITICAL: Add very explicit logging
@@ -449,7 +456,8 @@ def quick_parked_check(url: str) -> Tuple[bool, Optional[str]]:
         logger.info(f"Performing quick parked domain check for {domain}")
         
         # Call Go crawler with a short timeout for quick check
-        content, (error_type, error_detail) = go_crawl(url, timeout=10)
+        # CRITICAL: Use the increased QUICK_CHECK_TIMEOUT instead of hard-coded value
+        content, (error_type, error_detail) = go_crawl(url, timeout=QUICK_CHECK_TIMEOUT)
         
         # If Go crawler explicitly reports it as parked
         if error_type == "is_parked":
@@ -475,7 +483,7 @@ def quick_parked_check(url: str) -> Tuple[bool, Optional[str]]:
         return False, None
 
 # Compatibility functions - required by the rest of the system
-def apify_crawl(url: str, timeout: int = 30) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]]]:
+def apify_crawl(url: str, timeout: int = DEFAULT_TIMEOUT) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]]]:
     """
     Legacy function for backward compatibility.
     Redirects to the Go crawler implementation.
