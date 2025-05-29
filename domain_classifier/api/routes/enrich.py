@@ -119,7 +119,7 @@ def register_enrich_routes(app, snowflake_conn):
         except Exception as e:
             logger.error(f"Error storing classification for {domain}: {str(e)}")
         
-        # NEW CODE: Store data in N8N_DOMAIN_CONTENT table using direct SQL execution
+        # NEW CODE: Store data in N8N_DOMAIN_CONTENT table using existing connection
         n8n_content_stored = False
         try:
             # Get values from the request
@@ -127,57 +127,40 @@ def register_enrich_routes(app, snowflake_conn):
             word_count = crawl_stats.get('word_count', 0)
             crawler_type = 'go_crawler'  # Default value
             
-            # Create a temporary database connection directly
-            from snowflake import connector
-            import os
-            
-            # Read credentials from the same environment variables the connector uses
-            account = os.environ.get('SNOWFLAKE_ACCOUNT', '')
-            user = os.environ.get('SNOWFLAKE_USER', '')
-            password = os.environ.get('SNOWFLAKE_PASSWORD', '')
-            warehouse = os.environ.get('SNOWFLAKE_WAREHOUSE', '')
-            database = os.environ.get('SNOWFLAKE_DATABASE', '')
-            schema = os.environ.get('SNOWFLAKE_SCHEMA', '')
-            role = os.environ.get('SNOWFLAKE_ROLE', '')
-            
-            # Create a direct connection
-            conn = connector.connect(
-                account=account,
-                user=user, 
-                password=password,
-                warehouse=warehouse,
-                database=database,
-                schema=schema,
-                role=role
-            )
-            
-            try:
-                # Insert data into N8N_DOMAIN_CONTENT table
-                cursor = conn.cursor()
-                query = """
-                INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.N8N_DOMAIN_CONTENT 
-                (DOMAIN, CONTENT, CRAWLER_TYPE, PAGES_CRAWLED, WORD_COUNT)
-                VALUES (%s, %s, %s, %s, %s)
-                """
+            # Get a connection using the existing method
+            conn = snowflake_conn.get_connection()
+            if conn:
+                try:
+                    cursor = conn.cursor()
+                    # Set shorter query timeout
+                    cursor.execute("ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS=20")
+                    
+                    # Insert data into N8N_DOMAIN_CONTENT table
+                    query = """
+                    INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.N8N_DOMAIN_CONTENT 
+                    (DOMAIN, CONTENT, CRAWLER_TYPE, PAGES_CRAWLED, WORD_COUNT)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """
+                    
+                    cursor.execute(query, (
+                        domain,
+                        content,
+                        crawler_type,
+                        pages_crawled,
+                        word_count
+                    ))
+                    
+                    # Commit the transaction
+                    conn.commit()
+                    
+                    n8n_content_stored = True
+                    logger.info(f"Saved data to N8N_DOMAIN_CONTENT table for {domain}")
+                finally:
+                    # Always close the connection
+                    conn.close()
+            else:
+                logger.error("Failed to get Snowflake connection for N8N_DOMAIN_CONTENT insert")
                 
-                cursor.execute(query, (
-                    domain,
-                    content,
-                    crawler_type,
-                    pages_crawled,
-                    word_count
-                ))
-                
-                # Commit the transaction
-                conn.commit()
-                
-                n8n_content_stored = True
-                logger.info(f"Saved data to N8N_DOMAIN_CONTENT table for {domain}")
-                
-            finally:
-                # Ensure connection is closed
-                conn.close()
-            
         except Exception as e:
             logger.error(f"Error storing data in N8N_DOMAIN_CONTENT table for {domain}: {str(e)}")
         
