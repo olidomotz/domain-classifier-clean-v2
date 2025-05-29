@@ -1,5 +1,5 @@
 """
-Go Crawler for domain classification.
+Go Crawler for domain classification with enhanced logging.
 
 This module replaces all existing crawlers with a Go-based crawler
 while maintaining compatibility with the rest of the system.
@@ -12,7 +12,6 @@ import json
 import os
 import socket
 import traceback
-import re
 from urllib.parse import urlparse
 from typing import Tuple, Optional, Dict, Any, List
 
@@ -21,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 # Go crawler API URL (can be overridden with environment variable)
 CRAWLER_API_URL = os.environ.get("CRAWLER_API_URL", "http://157.245.84.110:8080/scrape")
+logger.info(f"Go crawler API URL: {CRAWLER_API_URL}")  # Log the URL being used
 
 # Global stats for tracking crawler usage (maintaining compatibility with original code)
 CRAWLER_STATS = {
@@ -86,6 +86,7 @@ def track_crawler_usage(crawler_type):
 def detect_error_type(error_message: str) -> Tuple[str, str]:
     """
     Analyze error message to determine the specific type of error.
+    This is kept from the original code to maintain compatibility.
     
     Args:
         error_message (str): The error message string
@@ -98,7 +99,7 @@ def detect_error_type(error_message: str) -> Tuple[str, str]:
     # Remote disconnect detection (anti-scraping)
     if any(phrase in error_message for phrase in ['remotedisconnected', 'remote end closed', 'connection reset', 'connection aborted']):
         return "anti_scraping", "The website appears to be using anti-scraping protection."
-        
+    
     # SSL Certificate errors
     if any(phrase in error_message for phrase in ['certificate has expired', 'certificate verify failed', 'ssl', 'cert']):
         if 'expired' in error_message:
@@ -111,26 +112,25 @@ def detect_error_type(error_message: str) -> Tuple[str, str]:
     # DNS resolution errors
     elif any(phrase in error_message for phrase in ['getaddrinfo failed', 'name or service not known', 'no such host']):
         return "dns_error", "The domain could not be resolved. It may not exist or DNS records may be misconfigured."
-        
+    
     # Connection errors
     elif any(phrase in error_message for phrase in ['connection refused', 'connection timed out', 'connection error']):
         return "connection_error", "Could not establish a connection to the website. It may be down or blocking our requests."
-        
+    
     # 4XX HTTP errors
     elif any(phrase in error_message for phrase in ['403', 'forbidden', '401', 'unauthorized']):
         return "access_denied", "Access to the website was denied. The site may be blocking automated access."
-    
     elif '404' in error_message or 'not found' in error_message:
         return "not_found", "The requested page was not found on this website."
-        
+    
     # 5XX HTTP errors
     elif any(phrase in error_message for phrase in ['500', '502', '503', '504', 'server error']):
         return "server_error", "The website is experiencing server errors."
-        
+    
     # Robots.txt or crawling restrictions
     elif any(phrase in error_message for phrase in ['robots.txt', 'disallowed', 'blocked by robots']):
         return "robots_restricted", "The website has restricted automated access in its robots.txt file."
-        
+    
     # Default fallback
     return "unknown_error", "An unknown error occurred while trying to access the website."
 
@@ -178,97 +178,115 @@ def go_crawl(url: str, timeout: int = 30) -> Tuple[Optional[str], Tuple[Optional
             "domain": domain
         }
         
-        # Make the request to Go crawler API
-        logger.info(f"Sending request to Go crawler API for domain: {domain}")
+        # Log the exact request being made for debugging
+        logger.info(f"Sending request to Go crawler API at {CRAWLER_API_URL} for domain: {domain}")
+        logger.info(f"Request payload: {json.dumps(payload)}")
+        
         start_time = time.time()
         
-        response = session.post(
-            CRAWLER_API_URL, 
-            json=payload, 
-            headers=headers, 
-            timeout=timeout
-        )
-        
-        elapsed_time = time.time() - start_time
-        logger.info(f"Go crawler API request completed in {elapsed_time:.2f} seconds")
-        
-        # Handle response
-        if response.status_code == 200:
-            try:
-                data = response.json()
-                
-                # Check for success indicator
-                if data.get('success', False) is False:
-                    error_message = data.get('error', 'Unknown error')
-                    logger.warning(f"Go crawler returned error for {domain}: {error_message}")
-                    
-                    # Map error type from Go crawler to what the system expects
-                    error_type = data.get('error_type', "go_crawler_error")
-                    
-                    # Standardize error types to match what the system expects
-                    if "dns" in error_type.lower() or "no such host" in error_message.lower():
-                        error_type = "dns_error"
-                    elif "ssl" in error_type.lower() or "certificate" in error_message.lower():
-                        error_type = "ssl_error"
-                    elif "timeout" in error_type.lower():
-                        error_type = "timeout"
-                    elif "forbidden" in error_message.lower() or "403" in error_message:
-                        error_type = "access_denied"
-                    elif "not found" in error_message.lower() or "404" in error_message:
-                        error_type = "not_found"
-                    
-                    return None, (error_type, error_message)
-                
-                # Extract content
-                content = data.get('content', '')
-                
-                # Additional metadata
-                pages_crawled = data.get('pages_crawled', 0)
-                word_count = data.get('word_count', 0)
-                
-                # Handle empty content
-                if not content or (isinstance(content, str) and len(content.strip()) == 0):
-                    logger.warning(f"Go crawler returned empty content for {domain}")
-                    return None, ("empty_content", "The website returned no content")
-                
-                # Check for parked domains in the crawler result
-                is_parked = data.get('is_parked', False)
-                if is_parked:
-                    logger.info(f"Go crawler detected parked domain: {domain}")
-                    return None, ("is_parked", "Domain appears to be parked based on Go crawler analysis")
-                
-                # Double-check for parked domain with local detection
-                from domain_classifier.classifiers.decision_tree import is_parked_domain
-                if content and isinstance(content, str) and is_parked_domain(content, domain):
-                    logger.info(f"Local check detected parked domain for {domain}")
-                    return None, ("is_parked", "Domain appears to be parked based on content analysis")
-                
-                # Log success
-                logger.info(f"Go crawler successful for {domain}: {pages_crawled} pages, {word_count} words, {len(content)} chars")
-                return content, (None, None)
-                
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse Go crawler response: {e}")
-                return None, ("response_error", f"Invalid JSON response from Go crawler: {e}")
-                
-            except Exception as e:
-                logger.error(f"Error processing Go crawler response: {e}")
-                return None, ("processing_error", f"Error processing Go crawler response: {e}")
-                
-        else:
-            logger.error(f"Go crawler API returned status code {response.status_code}")
-            return None, ("http_error", f"Go crawler API returned status code {response.status_code}")
+        try:
+            response = session.post(
+                CRAWLER_API_URL, 
+                json=payload, 
+                headers=headers, 
+                timeout=timeout
+            )
             
-    except requests.exceptions.Timeout:
-        logger.error(f"Timeout connecting to Go crawler API after {timeout} seconds")
-        return None, ("timeout", f"The Go crawler API took too long to respond (> {timeout} seconds)")
-        
-    except requests.exceptions.ConnectionError as e:
-        logger.error(f"Connection error with Go crawler API: {e}")
-        return None, ("connection_error", f"Could not connect to Go crawler API: {e}")
-        
+            elapsed_time = time.time() - start_time
+            logger.info(f"Go crawler API request completed in {elapsed_time:.2f} seconds with status code {response.status_code}")
+            
+            # Handle response
+            if response.status_code == 200:
+                try:
+                    data = response.json()
+                    
+                    # Log response data for debugging
+                    logger.info(f"Go crawler API response: {json.dumps(data)[:500]}...")
+                    
+                    # Check for success indicator
+                    if data.get('success', False) is False:
+                        error_message = data.get('error', 'Unknown error')
+                        logger.warning(f"Go crawler returned error for {domain}: {error_message}")
+                        
+                        # Map error type from Go crawler to what the system expects
+                        error_type = data.get('error_type', "go_crawler_error")
+                        
+                        # Standardize error types to match what the system expects
+                        if "dns" in error_type.lower() or "no such host" in error_message.lower():
+                            error_type = "dns_error"
+                        elif "ssl" in error_type.lower() or "certificate" in error_message.lower():
+                            error_type = "ssl_error"
+                        elif "timeout" in error_type.lower():
+                            error_type = "timeout"
+                        elif "forbidden" in error_message.lower() or "403" in error_message:
+                            error_type = "access_denied"
+                        elif "not found" in error_message.lower() or "404" in error_message:
+                            error_type = "not_found"
+                        
+                        return None, (error_type, error_message)
+                    
+                    # Extract content
+                    content = data.get('content', '')
+                    
+                    # Additional metadata
+                    pages_crawled = data.get('pages_crawled', 0)
+                    word_count = data.get('word_count', 0)
+                    
+                    # Handle empty content
+                    if not content or (isinstance(content, str) and len(content.strip()) == 0):
+                        logger.warning(f"Go crawler returned empty content for {domain}")
+                        return None, ("empty_content", "The website returned no content")
+                    
+                    # Check for parked domains in the crawler result
+                    is_parked = data.get('is_parked', False)
+                    if is_parked:
+                        logger.info(f"Go crawler detected parked domain: {domain}")
+                        return None, ("is_parked", "Domain appears to be parked based on Go crawler analysis")
+                    
+                    # Double-check for parked domain with local detection
+                    from domain_classifier.classifiers.decision_tree import is_parked_domain
+                    if content and isinstance(content, str) and is_parked_domain(content, domain):
+                        logger.info(f"Local check detected parked domain for {domain}")
+                        return None, ("is_parked", "Domain appears to be parked based on content analysis")
+                    
+                    # Log success
+                    logger.info(f"Go crawler successful for {domain}: {pages_crawled} pages, {word_count} words, {len(content)} chars")
+                    return content, (None, None)
+                    
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse Go crawler response: {e}")
+                    # Log the raw response for debugging
+                    logger.error(f"Raw response: {response.text[:1000]}")
+                    return None, ("response_error", f"Invalid JSON response from Go crawler: {e}")
+                    
+                except Exception as e:
+                    logger.error(f"Error processing Go crawler response: {e}")
+                    logger.error(traceback.format_exc())
+                    return None, ("processing_error", f"Error processing Go crawler response: {e}")
+                    
+            else:
+                logger.error(f"Go crawler API returned status code {response.status_code}")
+                # Log response content for debugging
+                logger.error(f"Response content: {response.text[:1000]}")
+                return None, ("http_error", f"Go crawler API returned status code {response.status_code}")
+                
+        except requests.exceptions.Timeout:
+            logger.error(f"Timeout connecting to Go crawler API after {timeout} seconds")
+            return None, ("timeout", f"The Go crawler API took too long to respond (> {timeout} seconds)")
+            
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"Connection error with Go crawler API: {e}")
+            return None, ("connection_error", f"Could not connect to Go crawler API: {e}")
+            
+        except Exception as e:
+            logger.error(f"Unexpected error with Go crawler: {e}")
+            logger.error(traceback.format_exc())
+            error_type, error_detail = detect_error_type(str(e))
+            return None, (error_type, error_detail)
+            
     except Exception as e:
-        logger.error(f"Unexpected error with Go crawler: {e}")
+        logger.error(f"Unexpected error in go_crawl: {e}")
+        logger.error(traceback.format_exc())
         error_type, error_detail = detect_error_type(str(e))
         return None, (error_type, error_detail)
 
@@ -288,7 +306,8 @@ def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optiona
         - crawler_type: The type of crawler used (always "go" in this case)
     """
     try:
-        logger.info(f"Starting crawl for {url}")
+        # CRITICAL: Add very explicit logging
+        logger.info(f"=== CRAWL WEBSITE CALLED FOR {url} ===")
         
         # Parse domain for later use
         domain = urlparse(url).netloc
@@ -351,6 +370,7 @@ def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optiona
             return None, ("is_parked", "Domain appears to be parked based on quick check"), "parked_check"
         
         # Call the Go crawler for the main content
+        logger.info(f"Calling Go crawler for {url}")
         content, (error_type, error_detail) = go_crawl(url)
         
         # Track the crawler usage
