@@ -1,8 +1,8 @@
 """
 Go Crawler for domain classification.
 
-This module completely replaces all existing crawlers with a Go-based crawler
-and removes duplicate parked domain and SSL checks.
+This module replaces all existing crawlers with a Go-based crawler
+while maintaining compatibility with the rest of the system.
 """
 
 import requests
@@ -12,6 +12,7 @@ import json
 import os
 import socket
 import traceback
+import re
 from urllib.parse import urlparse
 from typing import Tuple, Optional, Dict, Any, List
 
@@ -85,7 +86,6 @@ def track_crawler_usage(crawler_type):
 def detect_error_type(error_message: str) -> Tuple[str, str]:
     """
     Analyze error message to determine the specific type of error.
-    This is kept from the original code to maintain compatibility.
     
     Args:
         error_message (str): The error message string
@@ -98,7 +98,7 @@ def detect_error_type(error_message: str) -> Tuple[str, str]:
     # Remote disconnect detection (anti-scraping)
     if any(phrase in error_message for phrase in ['remotedisconnected', 'remote end closed', 'connection reset', 'connection aborted']):
         return "anti_scraping", "The website appears to be using anti-scraping protection."
-    
+        
     # SSL Certificate errors
     if any(phrase in error_message for phrase in ['certificate has expired', 'certificate verify failed', 'ssl', 'cert']):
         if 'expired' in error_message:
@@ -111,25 +111,26 @@ def detect_error_type(error_message: str) -> Tuple[str, str]:
     # DNS resolution errors
     elif any(phrase in error_message for phrase in ['getaddrinfo failed', 'name or service not known', 'no such host']):
         return "dns_error", "The domain could not be resolved. It may not exist or DNS records may be misconfigured."
-    
+        
     # Connection errors
     elif any(phrase in error_message for phrase in ['connection refused', 'connection timed out', 'connection error']):
         return "connection_error", "Could not establish a connection to the website. It may be down or blocking our requests."
-    
+        
     # 4XX HTTP errors
     elif any(phrase in error_message for phrase in ['403', 'forbidden', '401', 'unauthorized']):
         return "access_denied", "Access to the website was denied. The site may be blocking automated access."
+    
     elif '404' in error_message or 'not found' in error_message:
         return "not_found", "The requested page was not found on this website."
-    
+        
     # 5XX HTTP errors
     elif any(phrase in error_message for phrase in ['500', '502', '503', '504', 'server error']):
         return "server_error", "The website is experiencing server errors."
-    
+        
     # Robots.txt or crawling restrictions
     elif any(phrase in error_message for phrase in ['robots.txt', 'disallowed', 'blocked by robots']):
         return "robots_restricted", "The website has restricted automated access in its robots.txt file."
-    
+        
     # Default fallback
     return "unknown_error", "An unknown error occurred while trying to access the website."
 
@@ -149,11 +150,24 @@ def go_crawl(url: str, timeout: int = 30) -> Tuple[Optional[str], Tuple[Optional
     """
     try:
         logger.info(f"Starting Go crawler for {url}")
+        track_crawler_usage("go_started")
         
         # Extract domain for API call
         domain = urlparse(url).netloc
         if domain.startswith('www.'):
             domain = domain[4:]
+        
+        # Create a session with retry capabilities
+        session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(
+            max_retries=requests.adapters.Retry(
+                total=3,
+                backoff_factor=0.5,
+                status_forcelist=[429, 500, 502, 503, 504]
+            )
+        )
+        session.mount('http://', adapter)
+        session.mount('https://', adapter)
         
         # Prepare the request
         headers = {
@@ -168,7 +182,7 @@ def go_crawl(url: str, timeout: int = 30) -> Tuple[Optional[str], Tuple[Optional
         logger.info(f"Sending request to Go crawler API for domain: {domain}")
         start_time = time.time()
         
-        response = requests.post(
+        response = session.post(
             CRAWLER_API_URL, 
             json=payload, 
             headers=headers, 
@@ -188,8 +202,21 @@ def go_crawl(url: str, timeout: int = 30) -> Tuple[Optional[str], Tuple[Optional
                     error_message = data.get('error', 'Unknown error')
                     logger.warning(f"Go crawler returned error for {domain}: {error_message}")
                     
-                    # Map error type if provided
+                    # Map error type from Go crawler to what the system expects
                     error_type = data.get('error_type', "go_crawler_error")
+                    
+                    # Standardize error types to match what the system expects
+                    if "dns" in error_type.lower() or "no such host" in error_message.lower():
+                        error_type = "dns_error"
+                    elif "ssl" in error_type.lower() or "certificate" in error_message.lower():
+                        error_type = "ssl_error"
+                    elif "timeout" in error_type.lower():
+                        error_type = "timeout"
+                    elif "forbidden" in error_message.lower() or "403" in error_message:
+                        error_type = "access_denied"
+                    elif "not found" in error_message.lower() or "404" in error_message:
+                        error_type = "not_found"
+                    
                     return None, (error_type, error_message)
                 
                 # Extract content
@@ -208,7 +235,13 @@ def go_crawl(url: str, timeout: int = 30) -> Tuple[Optional[str], Tuple[Optional
                 is_parked = data.get('is_parked', False)
                 if is_parked:
                     logger.info(f"Go crawler detected parked domain: {domain}")
-                    return None, ("is_parked", "Domain appears to be parked based on Go crawler analysis"), 
+                    return None, ("is_parked", "Domain appears to be parked based on Go crawler analysis")
+                
+                # Double-check for parked domain with local detection
+                from domain_classifier.classifiers.decision_tree import is_parked_domain
+                if content and isinstance(content, str) and is_parked_domain(content, domain):
+                    logger.info(f"Local check detected parked domain for {domain}")
+                    return None, ("is_parked", "Domain appears to be parked based on content analysis")
                 
                 # Log success
                 logger.info(f"Go crawler successful for {domain}: {pages_crawled} pages, {word_count} words, {len(content)} chars")
@@ -236,12 +269,13 @@ def go_crawl(url: str, timeout: int = 30) -> Tuple[Optional[str], Tuple[Optional
         
     except Exception as e:
         logger.error(f"Unexpected error with Go crawler: {e}")
-        return None, ("unknown_error", f"Unexpected error: {e}")
+        error_type, error_detail = detect_error_type(str(e))
+        return None, (error_type, error_detail)
 
 def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]], Optional[str]]:
     """
-    Crawl a website using the Go-based crawler.
-    This function replaces the original crawl_website in apify_crawler.py.
+    Main function to crawl a website. This replaces the original crawler chain with
+    the Go crawler while maintaining compatibility with the rest of the system.
     
     Args:
         url: The URL to crawl
@@ -251,36 +285,119 @@ def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optiona
         - content: The crawled content or None if failed
         - error_type: Type of error if failed, None if successful
         - error_detail: Detailed error message if failed, None if successful
-        - crawler_type: The type of crawler used ("go")
+        - crawler_type: The type of crawler used (always "go" in this case)
     """
     try:
-        logger.info(f"Starting crawl for {url} with Go crawler")
+        logger.info(f"Starting crawl for {url}")
         
-        # Parse domain for DNS check
+        # Parse domain for later use
         domain = urlparse(url).netloc
         if domain.startswith('www.'):
             domain = domain[4:]
         
-        # Minimal DNS check - we still need this to avoid wasting API calls on non-existent domains
+        # CRITICAL: Comprehensive DNS check before attempting to crawl
+        # This is essential for proper classification of non-existent domains
         try:
-            socket.gethostbyname(domain)
-        except socket.gaierror:
-            logger.warning(f"Domain {domain} does not resolve - DNS error")
-            return None, ("dns_error", "This domain does not exist or cannot be resolved"), "go_dns_check"
+            dns_start = time.time()
+            socket.setdefaulttimeout(3.0)  # 3 seconds max for DNS
+            
+            # Try both with and without www
+            dns_errors = []
+            domains_to_check = [domain]
+            if not domain.startswith('www.'):
+                domains_to_check.append('www.' + domain)
+            
+            for d in domains_to_check:
+                try:
+                    socket.gethostbyname(d)
+                    logger.info(f"DNS resolution successful for {d}")
+                    break
+                except socket.gaierror as e:
+                    error_code = getattr(e, 'errno', None)
+                    error_str = str(e).lower()
+                    dns_errors.append((error_code, error_str))
+                    continue
+            
+            # If all checks failed, report DNS error
+            if len(dns_errors) == len(domains_to_check):
+                logger.warning(f"DNS resolution failed for {domain} and www.{domain}")
+                
+                # Get the first error for reporting
+                error_code, error_str = dns_errors[0]
+                
+                if error_code == -2 or "name or service not known" in error_str:
+                    logger.warning(f"Domain {domain} does not exist (Name not known)")
+                    return None, ("dns_error", f"The domain {domain} could not be resolved. It may not exist."), "dns_check"
+                elif error_code == -3 or "temporary failure in name resolution" in error_str:
+                    logger.warning(f"Domain {domain} has temporary DNS issues")
+                    return None, ("dns_error", f"Temporary DNS resolution failure for {domain}."), "dns_check"
+                else:
+                    logger.warning(f"DNS error for {domain}: {error_str}")
+                    return None, ("dns_error", f"The domain {domain} could not be resolved."), "dns_check"
+            
+            logger.info(f"DNS check completed in {time.time() - dns_start:.2f}s")
+            
+        except socket.timeout:
+            logger.warning(f"DNS resolution timed out for {domain}")
+            return None, ("dns_error", f"DNS resolution timed out for {domain}"), "dns_check"
+        except Exception as dns_err:
+            logger.error(f"Error during DNS check: {dns_err}")
+            return None, ("dns_error", f"Error checking DNS for {domain}: {dns_err}"), "dns_check"
         
-        # Call the Go crawler - all other checks (SSL, parked domains, etc.) are handled by the Go crawler
+        # CRITICAL: Quick check for parked domains before full crawl
+        is_parked, quick_content = quick_parked_check(url)
+        if is_parked:
+            logger.info(f"Quick check identified {domain} as a parked domain")
+            return None, ("is_parked", "Domain appears to be parked based on quick check"), "parked_check"
+        
+        # Call the Go crawler for the main content
         content, (error_type, error_detail) = go_crawl(url)
         
-        # Track the usage
-        track_crawler_usage("go")
+        # Track the crawler usage
+        track_crawler_usage("go_crawler")
         
-        # Check the result
+        # Process the result
         if content:
-            logger.info(f"Go crawler successful for {domain}, got {len(content)} characters")
+            # Check content length
+            content_length = len(content.strip())
+            logger.info(f"Go crawler got {content_length} chars for {domain}")
+            
+            # Make a final check for parked domain with the complete content
+            if content_length < 5000:  # Only check smaller content to avoid false positives
+                from domain_classifier.classifiers.decision_tree import is_parked_domain
+                if is_parked_domain(content, domain):
+                    logger.info(f"Content analysis detected parked domain for {domain}")
+                    return None, ("is_parked", "Domain appears to be parked based on content analysis"), "go_parked_detection"
+            
             return content, (None, None), "go"
         else:
+            # Handle specific error types
             logger.warning(f"Go crawler failed for {domain}: {error_type} - {error_detail}")
-            return None, (error_type, error_detail), "go_error"
+            
+            # Make sure error type is one the system recognizes
+            standardized_error_type = error_type
+            
+            # The following error types are specifically checked by the system
+            if error_type not in ["dns_error", "ssl_error", "ssl_expired", "ssl_invalid", 
+                                "connection_error", "timeout", "access_denied", "not_found", 
+                                "server_error", "robots_restricted", "is_parked"]:
+                # Map unknown error types to something the system understands
+                if "dns" in error_type.lower():
+                    standardized_error_type = "dns_error"
+                elif "ssl" in error_type.lower() or "certificate" in error_type.lower():
+                    standardized_error_type = "ssl_error"
+                elif "timeout" in error_type.lower():
+                    standardized_error_type = "timeout"
+                elif "403" in error_type.lower() or "forbidden" in error_type.lower():
+                    standardized_error_type = "access_denied"
+                elif "404" in error_type.lower() or "not found" in error_type.lower():
+                    standardized_error_type = "not_found"
+                elif "parked" in error_type.lower():
+                    standardized_error_type = "is_parked"
+                else:
+                    standardized_error_type = "unknown_error"
+            
+            return None, (standardized_error_type, error_detail), "go_error"
             
     except Exception as e:
         logger.error(f"Error in crawl_website: {e}")
@@ -288,51 +405,78 @@ def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optiona
         error_type, error_detail = detect_error_type(str(e))
         return None, (error_type, error_detail), "go_exception"
 
-# Required for compatibility with the original module
 def quick_parked_check(url: str) -> Tuple[bool, Optional[str]]:
     """
     Perform a quick check to see if a domain is likely parked.
-    This is a stub that delegates to the Go crawler and is kept for compatibility.
-    """
-    # Extract domain for API call
-    domain = urlparse(url).netloc
-    if domain.startswith('www.'):
-        domain = domain[4:]
-        
-    logger.info(f"Delegating parked domain check for {domain} to Go crawler")
+    This implementation checks using both Go crawler's is_parked flag
+    and our local is_parked_domain function if content is available.
     
-    # Call the Go crawler with a quick timeout
+    Args:
+        url (str): The URL to check
+        
+    Returns:
+        tuple: (is_parked, content)
+            - is_parked: Whether domain is parked
+            - content: Any content retrieved during check
+    """
     try:
+        # Parse domain for checking
+        domain = urlparse(url).netloc
+        if domain.startswith('www.'):
+            domain = domain[4:]
+        
+        # First try a quick crawl with the Go crawler
+        logger.info(f"Performing quick parked domain check for {domain}")
+        
+        # Call Go crawler with a short timeout for quick check
         content, (error_type, error_detail) = go_crawl(url, timeout=10)
         
-        # If the Go crawler identifies it as a parked domain
+        # If Go crawler explicitly reports it as parked
         if error_type == "is_parked":
-            return True, error_detail
-            
-        # If we got content, it's not parked
+            logger.info(f"Go crawler detected {domain} as parked domain")
+            return True, None
+        
+        # If we got content, do a local check
         if content:
-            return False, content
+            # Use the decision tree's is_parked_domain function
+            from domain_classifier.classifiers.decision_tree import is_parked_domain
+            if is_parked_domain(content, domain):
+                logger.info(f"Local check detected {domain} as parked domain")
+                return True, content
             
-        # If we got an error but not a parked domain error, it's not confirmed parked
+            # If not parked, return the content for potential reuse
+            return False, content
+        
+        # No content but also not explicitly marked as parked
         return False, None
         
     except Exception as e:
-        logger.warning(f"Error in parked domain check: {e}")
+        logger.warning(f"Error in quick_parked_check for {url}: {e}")
         return False, None
 
-# Compatibility functions - stubs that just use Go crawler
+# Compatibility functions - required by the rest of the system
 def apify_crawl(url: str, timeout: int = 30) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]]]:
     """
-    Compatibility function for apify_crawl. Uses Go crawler instead.
+    Legacy function for backward compatibility.
+    Redirects to the Go crawler implementation.
     """
-    logger.info(f"Using Go crawler instead of Apify for {url}")
+    logger.info(f"Redirecting apify_crawl to go_crawl for {url}")
     return go_crawl(url, timeout)
 
-# Required to maintain compatibility with original code
 def scrapy_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]]]:
     """
-    Compatibility function that redirects to Go crawler.
-    This allows importing this function from other modules.
+    Legacy function for backward compatibility.
+    Redirects to the Go crawler implementation.
     """
-    logger.info(f"Using Go crawler instead of Scrapy for {url}")
+    logger.info(f"Redirecting scrapy_crawl to go_crawl for {url}")
     return go_crawl(url)
+
+def try_multiple_protocols(domain: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]], Optional[str]]:
+    """
+    Legacy function for backward compatibility.
+    Redirects to the Go crawler implementation.
+    """
+    url = f"https://{domain}"
+    logger.info(f"Redirecting try_multiple_protocols to go_crawl for {domain}")
+    content, error_info = go_crawl(url)
+    return content, error_info, "go_multiple_protocols"
