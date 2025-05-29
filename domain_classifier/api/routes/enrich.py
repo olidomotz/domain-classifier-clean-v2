@@ -3,6 +3,7 @@
 import logging
 import traceback
 import re
+import json
 from flask import request, jsonify, current_app
 
 # Import utilities
@@ -38,6 +39,93 @@ def register_enrich_routes(app, snowflake_conn):
         from flask import Flask
         app = Flask(__name__)
         logger.info("Created new Flask app as fallback in enrich.py")
+
+    @app.route('/store-classification-data', methods=['POST'])
+    def store_classification_data():
+        """
+        Endpoint for storing classification data from n8n workflow.
+        Stores both content and classification in Snowflake.
+        """
+        from domain_classifier.storage.snowflake_connector import SnowflakeConnector
+        
+        logger = logging.getLogger(__name__)
+        data = request.json
+        
+        if not data or not data.get('domain'):
+            return jsonify({
+                "success": False,
+                "message": "Invalid request: domain is required"
+            }), 400
+        
+        domain = data.get('domain')
+        classification = data.get('classification', {})
+        company_info = data.get('company_info', {})
+        apollo_data = data.get('apollo_data', {})
+        content = data.get('content')
+        crawl_stats = data.get('crawl_stats', {})
+        
+        logger.info(f"Received n8n store request for domain: {domain}")
+        
+        # Initialize Snowflake connector
+        snowflake_conn = SnowflakeConnector()
+        
+        # Process and store the content if provided
+        content_stored = False
+        if content:
+            try:
+                url = company_info.get('url', f"https://{domain}")
+                success, error = snowflake_conn.save_domain_content(
+                    domain=domain,
+                    url=url,
+                    content=content
+                )
+                content_stored = success
+                if not success:
+                    logger.error(f"Failed to store content for {domain}: {error}")
+            except Exception as e:
+                logger.error(f"Error storing content for {domain}: {str(e)}")
+        
+        # Process and store the classification
+        classification_stored = False
+        try:
+            # Prepare classification data
+            predicted_class = classification.get('predicted_class', 'Unknown')
+            confidence_score = classification.get('confidence_score', 0)
+            confidence_scores = json.dumps(classification.get('confidence_scores', {}))
+            is_service_business = classification.get('is_service_business', False)
+            explanation = classification.get('explanation', '')
+            internal_it_potential = classification.get('internal_it_potential', 0)
+            
+            # Prepare Apollo data
+            apollo_json = json.dumps(apollo_data) if apollo_data else None
+            
+            # Store in Snowflake
+            success, error = snowflake_conn.save_classification(
+                domain=domain,
+                company_type=predicted_class,
+                confidence_score=confidence_score,
+                all_scores=confidence_scores,
+                model_metadata=json.dumps({"source": "n8n_workflow", "crawler": crawl_stats}),
+                low_confidence=confidence_score < 30,
+                detection_method="n8n_claude_agent",
+                llm_explanation=explanation,
+                apollo_company_data=apollo_json,
+                crawler_type="go_crawler",
+                classifier_type="claude-ai-agent"
+            )
+            classification_stored = success
+            if not success:
+                logger.error(f"Failed to store classification for {domain}: {error}")
+        except Exception as e:
+            logger.error(f"Error storing classification for {domain}: {str(e)}")
+        
+        return jsonify({
+            "success": content_stored and classification_stored,
+            "message": "Data processed for Snowflake storage",
+            "domain": domain,
+            "content_stored": content_stored,
+            "classification_stored": classification_stored
+        })
 
     @app.route('/classify-and-enrich', methods=['POST', 'OPTIONS'])
     def classify_and_enrich():
