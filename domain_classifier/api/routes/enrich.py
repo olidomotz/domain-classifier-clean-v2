@@ -82,11 +82,11 @@ def register_enrich_routes(app, snowflake_conn):
         processed_at = data.get('processed_at')
         
         # Complex JSON fields
-        social_media = json.dumps(data.get('social_media', {})) if data.get('social_media') else None
-        department_stats = json.dumps(data.get('department_stats', {})) if data.get('department_stats') else None
-        technologies = json.dumps(data.get('technologies', [])) if data.get('technologies') else None
-        tags = json.dumps(data.get('tags', [])) if data.get('tags') else None
-        data_sources = json.dumps(data.get('data_sources', {})) if data.get('data_sources') else None
+        social_media = json.dumps(data.get('social_media', {})) if data.get('social_media') else '{}'
+        department_stats = json.dumps(data.get('department_stats', {})) if data.get('department_stats') else '{}'
+        technologies = json.dumps(data.get('technologies', [])) if data.get('technologies') else '[]'
+        tags = json.dumps(data.get('tags', [])) if data.get('tags') else '[]'
+        data_sources = json.dumps(data.get('data_sources', {})) if data.get('data_sources') else '{}'
         
         # For backward compatibility - extract these from nested structures if not directly provided
         if not content and 'apiPayload' in data and 'content' in data['apiPayload']:
@@ -184,7 +184,7 @@ def register_enrich_routes(app, snowflake_conn):
                         TAGS, DATA_SOURCES
                     )
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
-                            TO_VARIANT(%s), TO_VARIANT(%s), TO_VARIANT(%s), TO_VARIANT(%s), TO_VARIANT(%s))
+                            PARSE_JSON(%s), PARSE_JSON(%s), PARSE_JSON(%s), PARSE_JSON(%s), PARSE_JSON(%s))
                     """
                     
                     # Convert processed_at to datetime if it's a string
