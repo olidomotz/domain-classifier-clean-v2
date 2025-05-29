@@ -1,4 +1,4 @@
-"""Fixed classify_routes.py to properly respect use_existing_content parameter."""
+"""Fixed classify_routes.py to properly return app and use LLM."""
 
 import logging
 import traceback
@@ -141,6 +141,7 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
             if dns_error == "parked_domain":
                 logger.info(f"Domain {domain} detected as parked domain during initial DNS check")
                 
+                from domain_classifier.classifiers.decision_tree import create_parked_domain_result
                 parked_result = create_parked_domain_result(domain, crawler_type="dns_check_parked")
                 result = process_fresh_result(parked_result, domain, email, url)
                 result["crawler_type"] = "dns_check_parked"
@@ -221,9 +222,9 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
             # Try to get content (either from DB or by crawling)
             content = None
             
-            # MODIFIED: Check use_existing_content parameter explicitly before getting content from DB
-            # If reclassifying AND use_existing_content is True, try to get existing content first
-            if force_reclassify and use_existing_content:
+            # If reclassifying AND using existing content is explicitly true, try to get existing content first
+            # CRITICAL FIX: Only check existing content if use_existing_content is True
+            if use_existing_content:
                 try:
                     content = snowflake_conn.get_domain_content(domain)
                     
@@ -259,50 +260,26 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                     content = None
                     
             # If we specifically requested to use existing content but none was found
-            if use_existing_content and not content and force_reclassify:
-                error_result = {
-                    "domain": domain,
-                    "error": "No existing content found",
-                    "predicted_class": "Unknown",
-                    "confidence_score": 0,
-                    "confidence_scores": {
-                        "Managed Service Provider": 0,
-                        "Integrator - Commercial A/V": 0,
-                        "Integrator - Residential A/V": 0,
-                        "Internal IT Department": 0
-                    },
-                    "explanation": f"We could not find previously stored content for {domain}. Please try recrawling instead.",
-                    "low_confidence": True,
-                    "no_existing_content": True,
-                    "website_url": url,
-                    "final_classification": "2-Internal IT",
-                    "crawler_type": "error_handler",
-                    "classifier_type": "error_handler"
-                }
-                
-                # Add email to response if input was an email
-                if email:
-                    error_result["email"] = email
-                    
-                # Format the response if requested
-                if use_new_format and has_api_formatter:
-                    return jsonify(format_api_response(error_result)), 404
-                else:
-                    return jsonify(error_result), 404
-                    
-            # If no content yet and we're not using existing content (or there was none), crawl the website
+            if use_existing_content and not content:
+                # CRITICAL FIX: Don't return a 404 error, continue with crawling
+                logger.warning(f"No existing content found for {domain}, will attempt to crawl")
+            
+            # If no content yet, crawl the website
             error_type = None
             error_detail = None
             
             if not content:
-                logger.info(f"Crawling website for {domain}")
+                # CRITICAL CHANGE: Make sure we log this clearly
+                logger.info(f"Crawling website for {domain} because no content was found or use_existing_content=False")
                 
                 content, (error_type, error_detail), crawler_type = crawl_website(url)
                 
                 if not content:
-                    # CRITICAL CHANGE: If crawling fails but we have a domain name,
-                    # still try LLM classification with just the domain name
-                    logger.info(f"No content for {domain}, attempting LLM classification with domain name only")
+                    # CRITICAL: Log this explicitly 
+                    logger.warning(f"Crawl returned no content for {domain} - error: {error_type}, {error_detail}")
+                    
+                    # Still try to classify based on domain name only
+                    logger.info(f"Attempting LLM classification with domain name only for {domain}")
                     
                     # Check for special domain cases to enhance LLM classification
                     from domain_classifier.classifiers.decision_tree import check_special_domain_cases
@@ -501,62 +478,63 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
             else:
                 return jsonify(error_result), 500
                 
-    # CRITICAL FIX: Return the app object
+    # Helper function for parked domain detection
+    def check_for_parked_domain(domain: str, url: str) -> Tuple[bool, Dict[str, Any]]:
+        """
+        Perform a quick check to determine if a domain is parked before full crawling.
+        
+        Args:
+            domain (str): The domain name
+            url (str): The full URL
+            
+        Returns:
+            tuple: (is_parked, result)
+                - is_parked: Whether the domain is parked
+                - result: The result dict if parked, None otherwise
+        """
+        try:
+            from domain_classifier.crawlers.direct_crawler import direct_crawl
+            from domain_classifier.classifiers.decision_tree import is_parked_domain, create_parked_domain_result
+            
+            logger.info(f"Performing quick check for parked domain: {domain}")
+            
+            quick_check_content, (error_type, error_detail), quick_crawler_type = direct_crawl(url, timeout=5.0)
+            
+            # Check if this is a parked domain
+            if error_type == "is_parked" or (quick_check_content and is_parked_domain(quick_check_content, domain)):
+                logger.info(f"Quick check detected parked domain: {domain}")
+                
+                parked_result = create_parked_domain_result(domain, crawler_type="quick_check_parked")
+                
+                # Process the result from the decision tree
+                result = {
+                    "domain": domain,
+                    "predicted_class": "Parked Domain",
+                    "confidence_score": 0,
+                    "confidence_scores": {
+                        "Managed Service Provider": 0,
+                        "Integrator - Commercial A/V": 0,
+                        "Integrator - Residential A/V": 0,
+                        "Internal IT Department": 0
+                    },
+                    "explanation": parked_result.get("llm_explanation", f"The domain {domain} appears to be parked or inactive. This domain may be registered but not actively in use for a business."),
+                    "low_confidence": True,
+                    "is_parked": True,
+                    "final_classification": "6-Parked Domain - no enrichment",
+                    "crawler_type": "quick_check_parked",
+                    "classifier_type": "early_detection",
+                    "detection_method": "parked_domain_detection",
+                    "source": "fresh"
+                }
+                
+                return True, result
+                
+            # If we get here, domain is not parked
+            return False, None
+            
+        except Exception as e:
+            logger.warning(f"Early parked domain check failed: {e}")
+            return False, None
+            
+    # CRITICAL: Return the app object
     return app
-
-def check_for_parked_domain(domain: str, url: str) -> Tuple[bool, Dict[str, Any]]:
-    """
-    Perform a quick check to determine if a domain is parked before full crawling.
-    
-    Args:
-        domain (str): The domain name
-        url (str): The full URL
-        
-    Returns:
-        tuple: (is_parked, result)
-            - is_parked: Whether the domain is parked
-            - result: The result dict if parked, None otherwise
-    """
-    try:
-        from domain_classifier.crawlers.direct_crawler import direct_crawl
-        from domain_classifier.classifiers.decision_tree import is_parked_domain, create_parked_domain_result
-        
-        logger.info(f"Performing quick check for parked domain: {domain}")
-        
-        quick_check_content, (error_type, error_detail), quick_crawler_type = direct_crawl(url, timeout=5.0)
-        
-        # Check if this is a parked domain
-        if error_type == "is_parked" or (quick_check_content and is_parked_domain(quick_check_content, domain)):
-            logger.info(f"Quick check detected parked domain: {domain}")
-            
-            parked_result = create_parked_domain_result(domain, crawler_type="quick_check_parked")
-            
-            # Process the result from the decision tree
-            result = {
-                "domain": domain,
-                "predicted_class": "Parked Domain",
-                "confidence_score": 0,
-                "confidence_scores": {
-                    "Managed Service Provider": 0,
-                    "Integrator - Commercial A/V": 0,
-                    "Integrator - Residential A/V": 0,
-                    "Internal IT Department": 0
-                },
-                "explanation": parked_result.get("llm_explanation", f"The domain {domain} appears to be parked or inactive. This domain may be registered but not actively in use for a business."),
-                "low_confidence": True,
-                "is_parked": True,
-                "final_classification": "6-Parked Domain - no enrichment",
-                "crawler_type": "quick_check_parked",
-                "classifier_type": "early_detection",
-                "detection_method": "parked_domain_detection",
-                "source": "fresh"
-            }
-            
-            return True, result
-            
-        # If we get here, domain is not parked
-        return False, None
-        
-    except Exception as e:
-        logger.warning(f"Early parked domain check failed: {e}")
-        return False, None
