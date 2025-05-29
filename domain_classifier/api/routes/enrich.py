@@ -5,6 +5,7 @@ import traceback
 import re
 import json
 from flask import request, jsonify, current_app
+from datetime import datetime
 
 # Import utilities
 from domain_classifier.utils.error_handling import detect_error_type, create_error_result, is_domain_worth_crawling
@@ -57,23 +58,59 @@ def register_enrich_routes(app, snowflake_conn):
                 "message": "Invalid request: domain is required"
             }), 400
         
+        # Extract all fields from the request
         domain = data.get('domain')
-        classification = data.get('classification', {})
-        company_info = data.get('company_info', {})
-        apollo_data = data.get('apollo_data', {})
+        company_name = data.get('company_name')
+        company_description = data.get('company_description')
+        website_url = data.get('website_url')
+        address = data.get('address')
+        phone = data.get('phone')
+        employee_count = data.get('employee_count')
+        founded_year = data.get('founded_year')
+        industry = data.get('industry')
+        classification = data.get('classification')
+        classification_confidence = data.get('classification_confidence')
+        is_parked_domain = data.get('is_parked_domain', False)
+        primary_department = data.get('primary_department')
+        primary_department_count = data.get('primary_department_count')
+        active_departments = data.get('active_departments')
+        org_sector = data.get('org_sector')
         content = data.get('content')
-        crawl_stats = data.get('crawl_stats', {})
+        crawler_type = data.get('crawler_type', 'go_crawler')
+        pages_crawled = data.get('pages_crawled', 0)
+        word_count = data.get('word_count', 0)
+        processed_at = data.get('processed_at')
+        
+        # Complex JSON fields
+        social_media = json.dumps(data.get('social_media', {})) if data.get('social_media') else None
+        department_stats = json.dumps(data.get('department_stats', {})) if data.get('department_stats') else None
+        technologies = json.dumps(data.get('technologies', [])) if data.get('technologies') else None
+        tags = json.dumps(data.get('tags', [])) if data.get('tags') else None
+        data_sources = json.dumps(data.get('data_sources', {})) if data.get('data_sources') else None
+        
+        # For backward compatibility - extract these from nested structures if not directly provided
+        if not content and 'apiPayload' in data and 'content' in data['apiPayload']:
+            content = data['apiPayload']['content']
+        
+        if not classification and 'apiPayload' in data and 'classification' in data['apiPayload']:
+            classification = data['apiPayload']['classification'].get('predicted_class')
+            
+        if not company_name and 'apiPayload' in data and 'company_info' in data['apiPayload']:
+            company_name = data['apiPayload']['company_info'].get('name')
         
         logger.info(f"Received n8n store request for domain: {domain}")
         
         # Initialize Snowflake connector
         snowflake_conn = SnowflakeConnector()
         
-        # Process and store the content if provided
+        # Store in original tables for backward compatibility
         content_stored = False
+        classification_stored = False
+        
+        # For backward compatibility, still store in the original tables
         if content:
             try:
-                url = company_info.get('url', f"https://{domain}")
+                url = website_url or f"https://{domain}"
                 success, error = snowflake_conn.save_domain_content(
                     domain=domain,
                     url=url,
@@ -85,48 +122,48 @@ def register_enrich_routes(app, snowflake_conn):
             except Exception as e:
                 logger.error(f"Error storing content for {domain}: {str(e)}")
         
-        # Process and store the classification
-        classification_stored = False
-        try:
-            # Prepare classification data
-            predicted_class = classification.get('predicted_class', 'Unknown')
-            confidence_score = classification.get('confidence_score', 0)
-            confidence_scores = json.dumps(classification.get('confidence_scores', {}))
-            is_service_business = classification.get('is_service_business', False)
-            explanation = classification.get('explanation', '')
-            internal_it_potential = classification.get('internal_it_potential', 0)
-            
-            # Prepare Apollo data
-            apollo_json = json.dumps(apollo_data) if apollo_data else None
-            
-            # Store in Snowflake
-            success, error = snowflake_conn.save_classification(
-                domain=domain,
-                company_type=predicted_class,
-                confidence_score=confidence_score,
-                all_scores=confidence_scores,
-                model_metadata=json.dumps({"source": "n8n_workflow", "crawler": crawl_stats}),
-                low_confidence=confidence_score < 30,
-                detection_method="n8n_claude_agent",
-                llm_explanation=explanation,
-                apollo_company_data=apollo_json,
-                crawler_type="go_crawler",
-                classifier_type="claude-ai-agent"
-            )
-            classification_stored = success
-            if not success:
-                logger.error(f"Failed to store classification for {domain}: {error}")
-        except Exception as e:
-            logger.error(f"Error storing classification for {domain}: {str(e)}")
+        # For backward compatibility
+        if classification:
+            try:
+                # Extract fields for backward compatibility
+                apollo_data = data.get('apollo_data', {})
+                apollo_json = json.dumps(apollo_data) if apollo_data else None
+                
+                confidence_score = classification_confidence or 0
+                confidence_scores = "{}"  # Default empty JSON
+                
+                # Try to get from nested structure if available
+                if 'apiPayload' in data and 'classification' in data['apiPayload']:
+                    confidence_scores = json.dumps(data['apiPayload']['classification'].get('confidence_scores', {}))
+                
+                # For backward compatibility
+                explanation = ""
+                if 'apiPayload' in data and 'classification' in data['apiPayload']:
+                    explanation = data['apiPayload']['classification'].get('explanation', '')
+                
+                # Store in original classification table
+                success, error = snowflake_conn.save_classification(
+                    domain=domain,
+                    company_type=classification,
+                    confidence_score=confidence_score,
+                    all_scores=confidence_scores,
+                    model_metadata=json.dumps({"source": "n8n_workflow"}),
+                    low_confidence=confidence_score < 30,
+                    detection_method="n8n_claude_agent",
+                    llm_explanation=explanation,
+                    apollo_company_data=apollo_json,
+                    crawler_type=crawler_type,
+                    classifier_type="claude-ai-agent"
+                )
+                classification_stored = success
+                if not success:
+                    logger.error(f"Failed to store classification for {domain}: {error}")
+            except Exception as e:
+                logger.error(f"Error storing classification for {domain}: {str(e)}")
         
-        # NEW CODE: Store data in N8N_DOMAIN_CONTENT table using existing connection
+        # Store data in N8N_DOMAIN_CONTENT table
         n8n_content_stored = False
         try:
-            # Get values from the request
-            pages_crawled = crawl_stats.get('pages_crawled', 0)
-            word_count = crawl_stats.get('word_count', 0)
-            crawler_type = 'go_crawler'  # Default value
-            
             # Get a connection using the existing method
             conn = snowflake_conn.get_connection()
             if conn:
@@ -135,19 +172,59 @@ def register_enrich_routes(app, snowflake_conn):
                     # Set shorter query timeout
                     cursor.execute("ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS=20")
                     
-                    # Insert data into N8N_DOMAIN_CONTENT table
+                    # Insert data into N8N_DOMAIN_CONTENT table with all fields
                     query = """
-                    INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.N8N_DOMAIN_CONTENT 
-                    (DOMAIN, CONTENT, CRAWLER_TYPE, PAGES_CRAWLED, WORD_COUNT)
-                    VALUES (%s, %s, %s, %s, %s)
+                    INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.N8N_DOMAIN_CONTENT (
+                        DOMAIN, COMPANY_NAME, COMPANY_DESCRIPTION, WEBSITE_URL, ADDRESS, 
+                        PHONE, EMPLOYEE_COUNT, FOUNDED_YEAR, INDUSTRY, CLASSIFICATION,
+                        CLASSIFICATION_CONFIDENCE, IS_PARKED_DOMAIN, PRIMARY_DEPARTMENT, 
+                        PRIMARY_DEPARTMENT_COUNT, ACTIVE_DEPARTMENTS, ORG_SECTOR, 
+                        CONTENT, CRAWLER_TYPE, PAGES_CRAWLED, WORD_COUNT,
+                        PROCESSED_AT, SOCIAL_MEDIA, DEPARTMENT_STATS, TECHNOLOGIES,
+                        TAGS, DATA_SOURCES
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
+                            TO_VARIANT(%s), TO_VARIANT(%s), TO_VARIANT(%s), TO_VARIANT(%s), TO_VARIANT(%s))
                     """
                     
+                    # Convert processed_at to datetime if it's a string
+                    processed_datetime = processed_at
+                    if isinstance(processed_at, str):
+                        try:
+                            processed_datetime = datetime.fromisoformat(processed_at.replace('Z', '+00:00'))
+                        except:
+                            processed_datetime = datetime.now()
+                    elif not processed_at:
+                        processed_datetime = datetime.now()
+                    
+                    # Execute the query with all parameters
                     cursor.execute(query, (
                         domain,
+                        company_name,
+                        company_description,
+                        website_url,
+                        address,
+                        phone,
+                        employee_count,
+                        founded_year,
+                        industry,
+                        classification,
+                        classification_confidence,
+                        is_parked_domain,
+                        primary_department,
+                        primary_department_count,
+                        active_departments,
+                        org_sector,
                         content,
                         crawler_type,
                         pages_crawled,
-                        word_count
+                        word_count,
+                        processed_datetime,
+                        social_media,
+                        department_stats,
+                        technologies,
+                        tags,
+                        data_sources
                     ))
                     
                     # Commit the transaction
@@ -165,12 +242,12 @@ def register_enrich_routes(app, snowflake_conn):
             logger.error(f"Error storing data in N8N_DOMAIN_CONTENT table for {domain}: {str(e)}")
         
         return jsonify({
-            "success": content_stored and classification_stored,
+            "success": n8n_content_stored,  # Define success by the new table insert
             "message": "Data processed for Snowflake storage",
             "domain": domain,
             "content_stored": content_stored,
             "classification_stored": classification_stored,
-            "n8n_content_stored": n8n_content_stored  # Add flag for new table
+            "n8n_content_stored": n8n_content_stored
         })
 
     @app.route('/classify-and-enrich', methods=['POST', 'OPTIONS'])
