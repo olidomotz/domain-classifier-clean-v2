@@ -1,5 +1,5 @@
 """
-Go Crawler for domain classification with increased timeout.
+Go Crawler for domain classification with proper response handling.
 
 This module replaces all existing crawlers with a Go-based crawler
 while maintaining compatibility with the rest of the system.
@@ -23,8 +23,8 @@ CRAWLER_API_URL = os.environ.get("CRAWLER_API_URL", "http://157.245.84.110:8080/
 logger.info(f"Go crawler API URL: {CRAWLER_API_URL}")  # Log the URL being used
 
 # CRITICAL: Increase default timeouts
-DEFAULT_TIMEOUT = 60  # Increased from 30 to 60 seconds
-QUICK_CHECK_TIMEOUT = 20  # Increased from 10 to 20 seconds
+DEFAULT_TIMEOUT = 90  # 90 seconds for main crawl
+QUICK_CHECK_TIMEOUT = 30  # 30 seconds for quick checks
 
 # Global stats for tracking crawler usage (maintaining compatibility with original code)
 CRAWLER_STATS = {
@@ -140,11 +140,11 @@ def detect_error_type(error_message: str) -> Tuple[str, str]:
 
 def go_crawl(url: str, timeout: int = DEFAULT_TIMEOUT) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]]]:
     """
-    Crawl a website using the Go-based crawler with increased timeout.
+    Crawl a website using the Go-based crawler with proper response handling.
     
     Args:
         url (str): The URL to crawl
-        timeout (int, optional): Request timeout in seconds. Defaults to DEFAULT_TIMEOUT (60 seconds).
+        timeout (int, optional): Request timeout in seconds. Defaults to DEFAULT_TIMEOUT (90 seconds).
     
     Returns:
         tuple: (content, (error_type, error_detail))
@@ -178,8 +178,10 @@ def go_crawl(url: str, timeout: int = DEFAULT_TIMEOUT) -> Tuple[Optional[str], T
             "Content-Type": "application/json"
         }
         
+        # CRITICAL FIX: Set max_depth to 0 to speed up crawling
         payload = {
-            "domain": domain
+            "domain": domain,
+            "max_depth": 0  # Only crawl the homepage to limit time
         }
         
         # Log the exact request being made for debugging
@@ -208,10 +210,39 @@ def go_crawl(url: str, timeout: int = DEFAULT_TIMEOUT) -> Tuple[Optional[str], T
                     data = response.json()
                     
                     # Log response data for debugging
-                    logger.info(f"Go crawler API response: {json.dumps(data)[:500]}...")
+                    logger.info(f"Go crawler API response success: {data.get('success', False)}")
                     
                     # Check for success indicator
-                    if data.get('success', False) is False:
+                    if data.get('success', False) is True:
+                        # CRITICAL FIX: Extract content correctly from the response structure
+                        content = data.get('content', '')
+                        word_count = data.get('word_count', 0)
+                        pages_crawled = data.get('pages_crawled', 0)
+                        
+                        logger.info(f"Go crawler returned {pages_crawled} pages with {word_count} words")
+                        
+                        # Handle empty content
+                        if not content or (isinstance(content, str) and len(content.strip()) == 0):
+                            logger.warning(f"Go crawler returned empty content for {domain}")
+                            return None, ("empty_content", "The website returned no content")
+                        
+                        # Check for parked domains in the crawler result
+                        is_parked = data.get('is_parked', False)
+                        if is_parked:
+                            logger.info(f"Go crawler detected parked domain: {domain}")
+                            return None, ("is_parked", "Domain appears to be parked based on Go crawler analysis")
+                        
+                        # Double-check for parked domain with local detection
+                        from domain_classifier.classifiers.decision_tree import is_parked_domain
+                        if content and isinstance(content, str) and is_parked_domain(content, domain):
+                            logger.info(f"Local check detected parked domain for {domain}")
+                            return None, ("is_parked", "Domain appears to be parked based on content analysis")
+                        
+                        # Log success
+                        logger.info(f"Go crawler successful for {domain}: {pages_crawled} pages, {word_count} words, {len(content)} chars")
+                        return content, (None, None)
+                    else:
+                        # Extract error information
                         error_message = data.get('error', 'Unknown error')
                         logger.warning(f"Go crawler returned error for {domain}: {error_message}")
                         
@@ -231,35 +262,7 @@ def go_crawl(url: str, timeout: int = DEFAULT_TIMEOUT) -> Tuple[Optional[str], T
                             error_type = "not_found"
                         
                         return None, (error_type, error_message)
-                    
-                    # Extract content
-                    content = data.get('content', '')
-                    
-                    # Additional metadata
-                    pages_crawled = data.get('pages_crawled', 0)
-                    word_count = data.get('word_count', 0)
-                    
-                    # Handle empty content
-                    if not content or (isinstance(content, str) and len(content.strip()) == 0):
-                        logger.warning(f"Go crawler returned empty content for {domain}")
-                        return None, ("empty_content", "The website returned no content")
-                    
-                    # Check for parked domains in the crawler result
-                    is_parked = data.get('is_parked', False)
-                    if is_parked:
-                        logger.info(f"Go crawler detected parked domain: {domain}")
-                        return None, ("is_parked", "Domain appears to be parked based on Go crawler analysis")
-                    
-                    # Double-check for parked domain with local detection
-                    from domain_classifier.classifiers.decision_tree import is_parked_domain
-                    if content and isinstance(content, str) and is_parked_domain(content, domain):
-                        logger.info(f"Local check detected parked domain for {domain}")
-                        return None, ("is_parked", "Domain appears to be parked based on content analysis")
-                    
-                    # Log success
-                    logger.info(f"Go crawler successful for {domain}: {pages_crawled} pages, {word_count} words, {len(content)} chars")
-                    return content, (None, None)
-                    
+                
                 except json.JSONDecodeError as e:
                     logger.error(f"Failed to parse Go crawler response: {e}")
                     # Log the raw response for debugging
