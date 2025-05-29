@@ -13,12 +13,12 @@ logger = logging.getLogger(__name__)
 def enhance_company_description(basic_description: str, apollo_data: Dict[str, Any], classification: Dict[str, Any]) -> str:
     """
     Create an enhanced company description using Apollo data and classification.
-
+    
     Args:
         basic_description: The original basic description
         apollo_data: Company data from Apollo
         classification: Classification result
-
+        
     Returns:
         str: Enhanced company description
     """
@@ -29,21 +29,20 @@ def enhance_company_description(basic_description: str, apollo_data: Dict[str, A
         except:
             # If parsing fails, treat as empty dict
             apollo_data = {}
-
+    
     # Import remove_redundancy from text_processing if available
     try:
         from domain_classifier.utils.text_processing import remove_redundancy
         has_remove_redundancy = True
     except ImportError:
         has_remove_redundancy = False
-        
+    
     enhanced_description = basic_description
     
     # Add company size and founding info if available
     if apollo_data and isinstance(apollo_data, dict) and apollo_data.get('employee_count'):
         employee_count = apollo_data.get('employee_count')
         founded_year = apollo_data.get('founded_year', '')
-        
         founded_phrase = ""  # Initialize with empty string
         
         # Only add founding year information if it's actually available
@@ -86,7 +85,7 @@ def enhance_company_description(basic_description: str, apollo_data: Dict[str, A
         # Remove common redundant phrases
         enhanced_description = re.sub(r'managed service provider.*managed service provider', 'managed service provider', enhanced_description, flags=re.IGNORECASE)
         enhanced_description = re.sub(r'allowing (?:clients|customers) to focus on (?:their|its) core business', '', enhanced_description, flags=re.IGNORECASE)
-    
+        
     # Additional cleanup to remove placeholder text
     enhanced_description = re.sub(r'\[(?:FOUNDING YEAR|founding year|YEAR|year)[^\]]*\]', '', enhanced_description)
     enhanced_description = re.sub(r'Founded in\s+,', '', enhanced_description)
@@ -96,29 +95,34 @@ def enhance_company_description(basic_description: str, apollo_data: Dict[str, A
     enhanced_description = re.sub(r'established in\s+,', '', enhanced_description)
     enhanced_description = re.sub(r'\s+,', ',', enhanced_description)  # Fix spaces before commas
     enhanced_description = re.sub(r'\s+\.', '.', enhanced_description)  # Fix spaces before periods
-    enhanced_description = re.sub(r'\.\s*\.', '.', enhanced_description)  # Fix multiple periods
+    enhanced_description = re.sub(r'\.\.', '.', enhanced_description)  # Fix multiple periods
     enhanced_description = re.sub(r'\s+', ' ', enhanced_description)  # Normalize spaces
     
     return enhanced_description
 
-def generate_detailed_description(classification: Dict[str, Any],
+def generate_detailed_description(classification: Dict[str, Any], 
                                  apollo_data: Optional[Dict] = None,
                                  apollo_person_data: Optional[Dict] = None) -> str:
     """
     Generate a detailed company description without fabricating data when none is available.
     Enhanced to better use Apollo data for classification when web content is unavailable.
-
+    
     Args:
         classification: The classification result
         apollo_data: Optional company data from Apollo
         apollo_person_data: Optional person data from Apollo
-
+        
     Returns:
         str: Detailed company description or factual statement about lack of data
     """
     try:
         domain = classification.get("domain", "unknown")
         
+        # CRITICAL FIX: Handle parked domains properly with an accurate description
+        if classification.get("is_parked", False) or classification.get("predicted_class") == "Parked Domain":
+            logger.info(f"Using parked domain description for {domain}")
+            return f"The domain {domain} appears to be parked or inactive with no active business content. This domain is likely registered but not currently in use for a company website."
+            
         # Handle DNS error cases first (highest priority)
         if classification.get("error_type") == "dns_error" or classification.get("is_dns_error") == True:
             logger.info(f"DNS error detected in generate_detailed_description for {domain}")
@@ -128,7 +132,7 @@ def generate_detailed_description(classification: Dict[str, Any],
             classification["predicted_class"] = "DNS Error"
             
             return f"The domain {domain} could not be resolved. It may not exist or its DNS records may be misconfigured."
-        
+            
         # Handle Process Did Not Complete with Apollo data (second priority)
         if classification.get("predicted_class") == "Process Did Not Complete":
             logger.info(f"Process Did Not Complete for {domain}, checking for Apollo data")
@@ -142,7 +146,7 @@ def generate_detailed_description(classification: Dict[str, Any],
                         description = apollo_data.get(field)
                         logger.info(f"Found Apollo {field} for {domain}")
                         break
-                
+                        
                 if description:
                     # Try to classify using Apollo description
                     try:
@@ -165,7 +169,7 @@ def generate_detailed_description(classification: Dict[str, Any],
                                 
                             if apollo_data.get("employee_count"):
                                 classification_text += f"Employee Count: {apollo_data['employee_count']}\n"
-                            
+                                
                             # Run classification on Apollo description
                             new_classification = classifier.classify(
                                 content=classification_text,
@@ -183,7 +187,7 @@ def generate_detailed_description(classification: Dict[str, Any],
                                 # Update confidence scores if available
                                 if "confidence_scores" in new_classification:
                                     classification["confidence_scores"] = new_classification.get("confidence_scores")
-                                
+                                    
                                 # Set is_service_business based on the classification
                                 classification["is_service_business"] = classification["predicted_class"] in [
                                     "Managed Service Provider",
@@ -200,13 +204,15 @@ def generate_detailed_description(classification: Dict[str, Any],
                                 
                                 # Add a note about using Apollo data
                                 return f"{description}\n\nNote: This description is based on Apollo data as the website could not be analyzed."
+                                
                     except Exception as e:
                         logger.error(f"Error classifying with Apollo data: {e}")
-            
+                        
             # If we get here, we couldn't reclassify using Apollo
             classification["final_classification"] = "8-Unknown/No Data"
+            
             return f"Unable to retrieve information for {domain} due to insufficient data."
-        
+            
         # Check if this is a "Process Did Not Complete" classification with no data
         if classification.get("predicted_class") == "Process Did Not Complete":
             domain = classification.get("domain", "unknown")
@@ -223,7 +229,7 @@ def generate_detailed_description(classification: Dict[str, Any],
                 classification["company_one_line"] = f"No data available for {domain}."
                 
                 return classification.get("company_description", "")
-        
+                
         # Extract domain and prediction for direct use
         domain = classification.get('domain', '')
         predicted_class = classification.get('predicted_class', '')
@@ -243,7 +249,7 @@ def generate_detailed_description(classification: Dict[str, Any],
             except:
                 # If parsing fails, treat as empty dict
                 apollo_person_data = {}
-        
+                
         # Check for parked domains with Apollo data
         if (classification.get("is_parked", False) or predicted_class == "Parked Domain") and apollo_data:
             # Get Apollo description
@@ -326,20 +332,22 @@ def generate_detailed_description(classification: Dict[str, Any],
             company_name = apollo_data.get("name")
         else:
             company_name = classification.get('company_name', domain.split('.')[0].capitalize())
-        
+            
         # Use Apollo short_description if available - this is a reliable factual source
         if apollo_data and isinstance(apollo_data, dict) and apollo_data.get("short_description"):
             logger.info(f"Using Apollo short_description for {domain}")
             classification["company_description"] = apollo_data.get("short_description")
             return classification["company_description"]
-        
+            
         # Build prompt with available information
         prompt = f"""Based on the following information, write a factual company description for {company_name}:
 
 Business Type: {predicted_class}
-Domain: {domain}
-"""
 
+Domain: {domain}
+
+"""
+        
         # Add Apollo data if available, but only include values that are actually present
         if apollo_data and isinstance(apollo_data, dict):
             industry = apollo_data.get('industry', '')
@@ -355,9 +363,10 @@ Domain: {domain}
                 
             if size:
                 prompt += f"Size: Approximately {size} employees\n"
-        
+                
         # Add the original description
         prompt += f"""
+
 Original Description: {classification.get('company_description', '')}
 
 Write a detailed factual description (~100 words) that focuses on what the company does. IMPORTANT REQUIREMENTS:
@@ -374,14 +383,15 @@ Write a detailed factual description (~100 words) that focuses on what the compa
 10. CRITICAL: For "Internal IT Department" companies, focus ENTIRELY on what the COMPANY does as a business - NOT on their IT department
 11. Do not use phrases like "as a managed service provider" or "as an integrator"
 12. If founding year is not available, simply omit any sentence about when the company was founded
-"""
 
+"""
+        
         # Special system message adjustment for Internal IT companies
         system_message = "You write factual, informative company descriptions without redundancy or technology mentions. You focus on what services a company provides in approximately 100 words, without marketing language. You NEVER use placeholders in brackets like [FOUNDING YEAR]."
         
         if predicted_class == "Internal IT Department":
             system_message = "You write factual, informative business descriptions without redundancy or technology mentions. For companies with internal IT departments, you focus ONLY on what the company does as a business, NEVER on their IT department. Write approximately 100 words, without marketing language. You NEVER use placeholders in brackets like [FOUNDING YEAR]."
-        
+            
         # Call Claude
         try:
             response = requests.post(
@@ -470,32 +480,34 @@ Write a detailed factual description (~100 words) that focuses on what the compa
                     # Cleanup after removals
                     description = re.sub(r'\s+', ' ', description).strip()
                     description = re.sub(r'\s*\.\s*\.', '.', description).strip()
-                
-                # Make sure the description still reads well
-                if description.endswith('.'):
-                    description = description[:-1]
-                
-                # Add "a business that" if needed
-                if company_name in description and not re.search(r'is a|is an', description, flags=re.IGNORECASE):
-                    description = re.sub(r'(?<=' + re.escape(company_name) + r')\s+', ' is a business that ', description, flags=re.IGNORECASE)
-                
-                # Add a period at the end if needed
-                if not description.endswith('.'):
-                    description += '.'
-                
+                    
+                    # Make sure the description still reads well
+                    if description.endswith('.'):
+                        description = description[:-1]
+                        
+                    # Add "a business that" if needed
+                    if company_name in description and not re.search(r'is a|is an', description, flags=re.IGNORECASE):
+                        description = re.sub(r'(?<=' + re.escape(company_name) + r')\s+', ' is a business that ', description, flags=re.IGNORECASE)
+                        
+                    # Add a period at the end if needed
+                    if not description.endswith('.'):
+                        description += '.'
+                        
                 # Save the description in the classification
                 classification['company_description'] = description
                 
                 return description
+                
             else:
                 logger.error(f"Error calling Claude for description: {response.status_code} - {response.text[:200]}")
                 return classification.get('company_description', '')
+                
         except Exception as e:
             logger.error(f"Error generating description: {e}")
             
             # Fall back to a constructed description
             return _construct_fallback_description(classification, apollo_data)
-    
+            
     except Exception as e:
         logger.error(f"Error generating description: {e}")
         
@@ -514,7 +526,11 @@ def _construct_fallback_description(classification: Dict[str, Any], apollo_data:
                 # CRITICAL: Set the final_classification directly
                 classification["final_classification"] = "8-Unknown/No Data"
                 return f"Unable to retrieve information for {domain} due to insufficient data."
-        
+                
+        # For parked domains, provide accurate description
+        if predicted_class == "Parked Domain" or classification.get("is_parked", False):
+            return f"The domain {domain} appears to be parked or inactive with no active business content. This domain is likely registered but not currently in use for a company website."
+                
         # Get company name
         company_name = None
         if apollo_data and isinstance(apollo_data, dict) and apollo_data.get("name"):
@@ -567,7 +583,6 @@ def _construct_fallback_description(classification: Dict[str, Any], apollo_data:
         
         # Ultimate fallback
         basic_desc = f"{classification.get('domain', 'The company')} is a {classification.get('predicted_class', 'business')}."
-        
         classification['company_description'] = basic_desc
         
         return basic_desc
