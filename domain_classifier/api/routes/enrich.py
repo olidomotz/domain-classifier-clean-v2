@@ -80,12 +80,12 @@ def register_enrich_routes(app, snowflake_conn):
         pages_crawled = data.get('pages_crawled', 0)
         word_count = data.get('word_count', 0)
         
-        # Prepare JSON strings for VARIANT columns
-        social_media_json = json.dumps(data.get('social_media', {})) if data.get('social_media') else '{}'
-        department_stats_json = json.dumps(data.get('department_stats', {})) if data.get('department_stats') else '{}'
-        technologies_json = json.dumps(data.get('technologies', [])) if data.get('technologies') else '[]'
-        tags_json = json.dumps(data.get('tags', [])) if data.get('tags') else '[]'
-        data_sources_json = json.dumps(data.get('data_sources', {})) if data.get('data_sources') else '{}'
+        # Prepare JSON strings for VARIANT columns - ensure they're always strings, not dictionaries
+        social_media_json = json.dumps(data.get('social_media', {})) if isinstance(data.get('social_media'), dict) else '{}'
+        department_stats_json = json.dumps(data.get('department_stats', {})) if isinstance(data.get('department_stats'), dict) else '{}'
+        technologies_json = json.dumps(data.get('technologies', [])) if isinstance(data.get('technologies'), list) else '[]'
+        tags_json = json.dumps(data.get('tags', [])) if isinstance(data.get('tags'), list) else '[]'
+        data_sources_json = json.dumps(data.get('data_sources', {})) if isinstance(data.get('data_sources'), dict) else '{}'
         
         # For backward compatibility - extract these from nested structures if not directly provided
         if not content and 'apiPayload' in data and 'content' in data['apiPayload']:
@@ -126,19 +126,24 @@ def register_enrich_routes(app, snowflake_conn):
             try:
                 # Extract fields for backward compatibility
                 apollo_data = data.get('apollo_data', {})
-                apollo_json = json.dumps(apollo_data) if apollo_data else None
+                # Ensure apollo_data is a JSON string, not a dict
+                apollo_json = json.dumps(apollo_data) if isinstance(apollo_data, dict) else (apollo_data or None)
                 
                 confidence_score = classification_confidence or 0
                 confidence_scores = "{}"  # Default empty JSON
                 
                 # Try to get from nested structure if available
                 if 'apiPayload' in data and 'classification' in data['apiPayload']:
-                    confidence_scores = json.dumps(data['apiPayload']['classification'].get('confidence_scores', {}))
+                    confidence_scores_dict = data['apiPayload']['classification'].get('confidence_scores', {})
+                    confidence_scores = json.dumps(confidence_scores_dict) if isinstance(confidence_scores_dict, dict) else '{}'
                 
                 # For backward compatibility
                 explanation = ""
                 if 'apiPayload' in data and 'classification' in data['apiPayload']:
                     explanation = data['apiPayload']['classification'].get('explanation', '')
+                
+                # Ensure model_metadata is a JSON string
+                model_metadata = json.dumps({"source": "n8n_workflow"})
                 
                 # Store in original classification table
                 success, error = snowflake_conn.save_classification(
@@ -146,7 +151,7 @@ def register_enrich_routes(app, snowflake_conn):
                     company_type=classification,
                     confidence_score=confidence_score,
                     all_scores=confidence_scores,
-                    model_metadata=json.dumps({"source": "n8n_workflow"}),
+                    model_metadata=model_metadata,
                     low_confidence=confidence_score < 30,
                     detection_method="n8n_claude_agent",
                     llm_explanation=explanation,
@@ -166,6 +171,7 @@ def register_enrich_routes(app, snowflake_conn):
             # Get a connection using the existing method
             conn = snowflake_conn.get_connection()
             if conn:
+                cursor = None
                 try:
                     cursor = conn.cursor()
                     # Set shorter query timeout
@@ -227,14 +233,24 @@ def register_enrich_routes(app, snowflake_conn):
                     
                     n8n_content_stored = True
                     logger.info(f"Saved data to N8N_DOMAIN_CONTENT table for {domain}")
+                except Exception as inner_e:
+                    logger.error(f"Error executing N8N_DOMAIN_CONTENT query: {str(inner_e)}")
+                    # Log more details about the error
+                    logger.error(f"Error details: {traceback.format_exc()}")
+                    if conn:
+                        conn.rollback()
                 finally:
-                    # Always close the connection
-                    conn.close()
+                    # Always close the cursor and connection
+                    if cursor:
+                        cursor.close()
+                    if conn:
+                        conn.close()
             else:
                 logger.error("Failed to get Snowflake connection for N8N_DOMAIN_CONTENT insert")
                 
         except Exception as e:
             logger.error(f"Error storing data in N8N_DOMAIN_CONTENT table for {domain}: {str(e)}")
+            logger.error(f"Error details: {traceback.format_exc()}")
         
         return jsonify({
             "success": n8n_content_stored,  # Define success by the new table insert
