@@ -126,13 +126,16 @@ def register_enrich_routes(app, snowflake_conn):
             try:
                 # Extract fields for backward compatibility
                 apollo_data = data.get('apollo_data', {})
-                # Ensure apollo_data is a JSON string, not a dict
+                
+                # Ensure apollo_data is a string, not a dict
                 if isinstance(apollo_data, dict):
                     apollo_json = json.dumps(apollo_data)
                 else:
                     apollo_json = apollo_data or None
                 
                 confidence_score = classification_confidence or 0
+                
+                # Ensure confidence_scores is a JSON string
                 confidence_scores = "{}"  # Default empty JSON
                 
                 # Try to get from nested structure if available
@@ -181,6 +184,10 @@ def register_enrich_routes(app, snowflake_conn):
                     # Set shorter query timeout
                     cursor.execute("ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS=20")
                     
+                    # Log the parameter types for debugging
+                    logger.info(f"N8N_DOMAIN_CONTENT parameters: social_media={type(social_media_json)}, "
+                              f"department_stats={type(department_stats_json)}, technologies={type(technologies_json)}")
+                    
                     # Insert all fields with PARSE_JSON for VARIANT columns
                     query = """
                     INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.N8N_DOMAIN_CONTENT (
@@ -204,6 +211,7 @@ def register_enrich_routes(app, snowflake_conn):
                     """
                     
                     # Execute the query with properly prepared parameters
+                    # CRITICAL: Ensure all parameters are of supported types
                     cursor.execute(query, (
                         domain,
                         company_name,
@@ -225,11 +233,11 @@ def register_enrich_routes(app, snowflake_conn):
                         crawler_type,
                         pages_crawled,
                         word_count,
-                        social_media_json,
-                        department_stats_json,
-                        technologies_json,
-                        tags_json,
-                        data_sources_json
+                        social_media_json,      # These are all guaranteed to be strings now, not dicts
+                        department_stats_json,  # These are all guaranteed to be strings now, not dicts
+                        technologies_json,      # These are all guaranteed to be strings now, not dicts
+                        tags_json,              # These are all guaranteed to be strings now, not dicts
+                        data_sources_json       # These are all guaranteed to be strings now, not dicts
                     ))
                     
                     # Commit the transaction
