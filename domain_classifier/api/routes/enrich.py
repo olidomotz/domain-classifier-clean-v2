@@ -45,8 +45,7 @@ def register_enrich_routes(app, snowflake_conn):
     def store_classification_data():
         """
         Endpoint for storing classification data from n8n workflow.
-        Stores both content and classification in Snowflake.
-        Uses a two-step approach for complex data to avoid Snowflake parameter binding issues.
+        Focuses solely on storing data in the N8N_DOMAIN_CONTENT table.
         """
         from domain_classifier.storage.snowflake_connector import SnowflakeConnector
         
@@ -96,11 +95,8 @@ def register_enrich_routes(app, snowflake_conn):
         # Initialize Snowflake connector
         snowflake_conn = SnowflakeConnector()
         
-        # Store in original tables for backward compatibility
+        # Store content in the DOMAIN_CONTENT table for backward compatibility
         content_stored = False
-        classification_stored = False
-        
-        # For backward compatibility, still store in the original tables
         if content:
             try:
                 url = website_url or f"https://{domain}"
@@ -115,22 +111,22 @@ def register_enrich_routes(app, snowflake_conn):
             except Exception as e:
                 logger.error(f"Error storing content for {domain}: {str(e)}")
         
-        # Store data in N8N_DOMAIN_CONTENT table - using two-step approach to avoid parameter binding issues
+        # Store data in N8N_DOMAIN_CONTENT table - using two-step approach
         n8n_content_stored = False
         conn = None
         cursor = None
         try:
-            # Get JSON data for complex fields
+            # Prepare JSON data for complex fields
             social_media = {}
             department_stats = {}
             technologies = []
             tags = []
             data_sources = {}
             
-            # Extract from data or apiPayload
-            if 'social_media' in data:
+            # Extract from data structure
+            if 'social_media' in data and data['social_media']:
                 social_media = data.get('social_media')
-            elif 'social_media_json' in data:
+            elif 'social_media_json' in data and data['social_media_json']:
                 try:
                     social_media = json.loads(data.get('social_media_json'))
                 except:
@@ -138,9 +134,9 @@ def register_enrich_routes(app, snowflake_conn):
             elif 'apiPayload' in data and 'social_media' in data['apiPayload']:
                 social_media = data['apiPayload'].get('social_media')
                 
-            if 'department_stats' in data:
+            if 'department_stats' in data and data['department_stats']:
                 department_stats = data.get('department_stats')
-            elif 'department_stats_json' in data:
+            elif 'department_stats_json' in data and data['department_stats_json']:
                 try:
                     department_stats = json.loads(data.get('department_stats_json'))
                 except:
@@ -148,9 +144,9 @@ def register_enrich_routes(app, snowflake_conn):
             elif 'apiPayload' in data and 'department_stats' in data['apiPayload']:
                 department_stats = data['apiPayload'].get('department_stats')
                 
-            if 'technologies' in data:
+            if 'technologies' in data and data['technologies']:
                 technologies = data.get('technologies')
-            elif 'technologies_json' in data:
+            elif 'technologies_json' in data and data['technologies_json']:
                 try:
                     technologies = json.loads(data.get('technologies_json'))
                 except:
@@ -158,9 +154,9 @@ def register_enrich_routes(app, snowflake_conn):
             elif 'apiPayload' in data and 'technologies' in data['apiPayload']:
                 technologies = data['apiPayload'].get('technologies')
                 
-            if 'tags' in data:
+            if 'tags' in data and data['tags']:
                 tags = data.get('tags')
-            elif 'tags_json' in data:
+            elif 'tags_json' in data and data['tags_json']:
                 try:
                     tags = json.loads(data.get('tags_json'))
                 except:
@@ -168,9 +164,9 @@ def register_enrich_routes(app, snowflake_conn):
             elif 'apiPayload' in data and 'tags' in data['apiPayload']:
                 tags = data['apiPayload'].get('tags')
                 
-            if 'data_sources' in data:
+            if 'data_sources' in data and data['data_sources']:
                 data_sources = data.get('data_sources')
-            elif 'data_sources_json' in data:
+            elif 'data_sources_json' in data and data['data_sources_json']:
                 try:
                     data_sources = json.loads(data.get('data_sources_json'))
                 except:
@@ -222,7 +218,7 @@ def register_enrich_routes(app, snowflake_conn):
                     word_count
                 ))
                 
-                # STEP 2: Update with JSON data using PARSE_JSON
+                # STEP 2: Update with JSON data using parameter binding
                 # Convert all complex data to JSON strings
                 social_media_json = json.dumps(social_media)
                 department_stats_json = json.dumps(department_stats)
@@ -230,7 +226,7 @@ def register_enrich_routes(app, snowflake_conn):
                 tags_json = json.dumps(tags)
                 data_sources_json = json.dumps(data_sources)
                 
-                # Update using direct SQL with parameter binding - THIS IS THE KEY PART
+                # Update using parameter binding with PARSE_JSON
                 update_query = """
                 UPDATE DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.N8N_DOMAIN_CONTENT
                 SET 
@@ -275,124 +271,11 @@ def register_enrich_routes(app, snowflake_conn):
             if conn:
                 conn.close()
         
-        # For classification, skip it if it fails - we already have the data in N8N_DOMAIN_CONTENT
-        if classification and not classification_stored:
-            try:
-                # Extract fields for backward compatibility
-                apollo_data = data.get('apollo_data', {})
-                
-                # Convert all complex data to strings BEFORE passing to save_classification
-                apollo_json = None
-                if apollo_data:
-                    if isinstance(apollo_data, dict):
-                        apollo_json = json.dumps(apollo_data)
-                    else:
-                        apollo_json = apollo_data
-                        
-                confidence_score = classification_confidence or 0
-                
-                # Handle confidence_scores
-                confidence_scores = None
-                if 'apiPayload' in data and 'classification' in data['apiPayload']:
-                    confidence_scores_dict = data['apiPayload']['classification'].get('confidence_scores', {})
-                    if confidence_scores_dict:
-                        confidence_scores = json.dumps(confidence_scores_dict)
-                
-                if not confidence_scores:
-                    # Create a simple confidence_scores object
-                    scores_dict = {
-                        "Managed Service Provider": 0,
-                        "Integrator - Commercial A/V": 0,
-                        "Integrator - Residential A/V": 0,
-                        "Internal IT Department": 0
-                    }
-                    
-                    # Set the score for the classification
-                    if classification in scores_dict:
-                        scores_dict[classification] = confidence_score
-                    
-                    confidence_scores = json.dumps(scores_dict)
-                
-                # For backward compatibility
-                explanation = ""
-                if 'apiPayload' in data and 'classification' in data['apiPayload']:
-                    explanation = data['apiPayload']['classification'].get('explanation', '')
-                
-                # Create a simple model_metadata
-                model_metadata = json.dumps({"source": "n8n_workflow"})
-                
-                # We'll skip saving classification if it fails - not critical since we have data in N8N_DOMAIN_CONTENT
-                conn = snowflake_conn.get_connection()
-                if conn:
-                    try:
-                        cursor = conn.cursor()
-                        cursor.execute("ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS=20")
-                        
-                        # Use this direct SQL with proper parameter binding for the JSON data
-                        # This is key - we're using parameter binding with PARSE_JSON here
-                        query = """
-                        INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION 
-                        (domain, company_type, confidence_score, all_scores, model_metadata, 
-                        low_confidence, detection_method, classification_date, llm_explanation,
-                        crawler_type, classifier_type, bulk_process_id)
-                        VALUES (
-                            %s, %s, %s, 
-                            PARSE_JSON(%s), 
-                            PARSE_JSON(%s), 
-                            %s, %s, CURRENT_TIMESTAMP(), %s, %s, %s, NULL
-                        )
-                        """
-                        
-                        cursor.execute(query, (
-                            domain, 
-                            classification, 
-                            confidence_score,
-                            confidence_scores,
-                            model_metadata,
-                            confidence_score < 30,
-                            "n8n_claude_agent",
-                            explanation,
-                            crawler_type,
-                            "claude-ai-agent"
-                        ))
-                        
-                        # If we have Apollo data, update it separately
-                        if apollo_json:
-                            update_query = """
-                            UPDATE DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION
-                            SET apollo_company_data = PARSE_JSON(%s)
-                            WHERE domain = %s AND classification_date = (
-                                SELECT MAX(classification_date) 
-                                FROM DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION
-                                WHERE domain = %s
-                            )
-                            """
-                            
-                            cursor.execute(update_query, (apollo_json, domain, domain))
-                        
-                        conn.commit()
-                        classification_stored = True
-                        logger.info(f"Successfully stored classification for {domain}")
-                    except Exception as inner_e:
-                        # This is just a nice-to-have, so log the error but continue
-                        logger.error(f"Error storing classification: {str(inner_e)}")
-                        if conn:
-                            conn.rollback()
-                    finally:
-                        if cursor:
-                            cursor.close()
-                        if conn:
-                            conn.close()
-            except Exception as e:
-                # This is not critical, so just log and continue
-                logger.error(f"Error processing classification data: {str(e)}")
-        
         return jsonify({
-            "success": n8n_content_stored,  # Define success by the new table insert
+            "success": n8n_content_stored,
             "message": "Data processed for Snowflake storage",
             "domain": domain,
             "content_stored": content_stored,
-            "classification_stored": classification_stored,
             "n8n_content_stored": n8n_content_stored
         })
         
