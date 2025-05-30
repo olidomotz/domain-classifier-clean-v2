@@ -45,7 +45,7 @@ def register_enrich_routes(app, snowflake_conn):
     def store_simple_data():
         """
         Simplified endpoint for storing flat data from n8n workflow.
-        This avoids all the complex nested structures that cause issues with Snowflake.
+        This uses existing tables rather than trying to create new ones.
         """
         from domain_classifier.storage.snowflake_connector import SnowflakeConnector
         
@@ -80,125 +80,70 @@ def register_enrich_routes(app, snowflake_conn):
             except Exception as e:
                 logger.error(f"Error storing content: {str(e)}")
         
-        # Store data in N8N_SIMPLIFIED table
-        n8n_stored = False
-        conn = None
-        cursor = None
+        # Store classification in the existing classification table
+        classification_stored = False
         try:
-            conn = snowflake_conn.get_connection()
-            if conn:
-                cursor = conn.cursor()
-                # Set shorter query timeout
-                cursor.execute("ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS=20")
-                
-                # Create a new simplified table if it doesn't exist
-                create_table_query = """
-                CREATE TABLE IF NOT EXISTS DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.N8N_SIMPLIFIED (
-                    ID NUMBER AUTOINCREMENT,
-                    DOMAIN VARCHAR(255) NOT NULL,
-                    COMPANY_NAME VARCHAR(255),
-                    COMPANY_DESCRIPTION TEXT,
-                    WEBSITE_URL VARCHAR(255),
-                    ADDRESS VARCHAR(255),
-                    PHONE VARCHAR(50),
-                    EMPLOYEE_COUNT NUMBER,
-                    FOUNDED_YEAR NUMBER,
-                    INDUSTRY VARCHAR(255),
-                    CLASSIFICATION VARCHAR(100),
-                    CLASSIFICATION_CONFIDENCE NUMBER,
-                    IS_SERVICE_BUSINESS NUMBER(1),
-                    EXPLANATION TEXT,
-                    INTERNAL_IT_POTENTIAL NUMBER,
-                    PRIMARY_DEPARTMENT VARCHAR(100),
-                    PRIMARY_DEPARTMENT_COUNT NUMBER,
-                    ACTIVE_DEPARTMENTS NUMBER,
-                    ORG_SECTOR VARCHAR(255),
-                    CONTENT TEXT,
-                    CRAWLER_TYPE VARCHAR(50),
-                    PAGES_CRAWLED NUMBER,
-                    WORD_COUNT NUMBER,
-                    SOCIAL_MEDIA_JSON VARCHAR(1000),
-                    DEPARTMENT_STATS_JSON VARCHAR(2000),
-                    TECHNOLOGIES_JSON VARCHAR(2000),
-                    TAGS_JSON VARCHAR(5000),
-                    DATA_SOURCES_JSON VARCHAR(500),
-                    IS_PARKED_DOMAIN NUMBER(1),
-                    PROCESSED_AT TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
-                    PRIMARY KEY (ID)
-                )
-                """
-                cursor.execute(create_table_query)
-                
-                # Insert into the simplified table
-                query = """
-                INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.N8N_SIMPLIFIED (
-                    DOMAIN, COMPANY_NAME, COMPANY_DESCRIPTION, WEBSITE_URL, ADDRESS, 
-                    PHONE, EMPLOYEE_COUNT, FOUNDED_YEAR, INDUSTRY, CLASSIFICATION,
-                    CLASSIFICATION_CONFIDENCE, IS_SERVICE_BUSINESS, EXPLANATION, INTERNAL_IT_POTENTIAL, 
-                    PRIMARY_DEPARTMENT, PRIMARY_DEPARTMENT_COUNT, ACTIVE_DEPARTMENTS, ORG_SECTOR, 
-                    CONTENT, CRAWLER_TYPE, PAGES_CRAWLED, WORD_COUNT,
-                    SOCIAL_MEDIA_JSON, DEPARTMENT_STATS_JSON, TECHNOLOGIES_JSON,
-                    TAGS_JSON, DATA_SOURCES_JSON, IS_PARKED_DOMAIN
-                )
-                VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-                )
-                """
-                
-                # Execute with only simple types in parameters
-                cursor.execute(query, (
-                    data.get('domain', ''),
-                    data.get('company_name', ''),
-                    data.get('company_description', ''),
-                    data.get('website_url', ''),
-                    data.get('address', ''),
-                    data.get('phone', ''),
-                    data.get('employee_count', 0),
-                    data.get('founded_year', 0),
-                    data.get('industry', ''),
-                    data.get('classification', ''),
-                    data.get('classification_confidence', 0),
-                    data.get('is_service_business', 0),
-                    data.get('explanation', ''),
-                    data.get('internal_it_potential', 0),
-                    data.get('primary_department', ''),
-                    data.get('primary_department_count', 0),
-                    data.get('active_departments', 0),
-                    data.get('org_sector', ''),
-                    data.get('content', ''),
-                    data.get('crawler_type', 'n8n_workflow'),
-                    data.get('pages_crawled', 0),
-                    data.get('word_count', 0),
-                    data.get('social_media_json', '{}'),
-                    data.get('department_stats_json', '{}'),
-                    data.get('technologies_json', '[]'),
-                    data.get('tags_json', '[]'),
-                    data.get('data_sources_json', '{}'),
-                    data.get('is_parked_domain', 0)
-                ))
-                
-                conn.commit()
-                n8n_stored = True
-                logger.info(f"Successfully stored simplified data for {data.get('domain')}")
-            else:
-                logger.error("Failed to get Snowflake connection")
+            # Convert dictionaries to JSON strings
+            all_scores = json.dumps({
+                "Managed Service Provider": data.get('classification_confidence', 0),
+                "Integrator - Commercial A/V": 0,
+                "Integrator - Residential A/V": 0,
+                "Internal IT Department": 0
+            })
+            
+            model_metadata = json.dumps({
+                "source": "n8n_workflow_simplified"
+            })
+            
+            # Convert social media and other complex objects to JSON strings for Apollo data
+            social_media = {}
+            if data.get('social_media_json'):
+                try:
+                    social_media = json.loads(data.get('social_media_json'))
+                except:
+                    pass
+                    
+            apollo_data = {
+                "name": data.get('company_name', ''),
+                "description": data.get('company_description', ''),
+                "industry": data.get('industry', ''),
+                "phone": data.get('phone', ''),
+                "address": data.get('address', ''),
+                "employee_count": data.get('employee_count', 0),
+                "founded_year": data.get('founded_year', 0),
+                "social_media": social_media
+            }
+            
+            apollo_json = json.dumps(apollo_data)
+            
+            # Store in original classification table
+            success, error = snowflake_conn.save_classification(
+                domain=data.get('domain'),
+                company_type=data.get('classification'),
+                confidence_score=data.get('classification_confidence', 0),
+                all_scores=all_scores,
+                model_metadata=model_metadata,
+                low_confidence=data.get('classification_confidence', 0) < 30,
+                detection_method="n8n_simple_data",
+                llm_explanation=data.get('explanation', ''),
+                apollo_company_data=apollo_json,
+                crawler_type=data.get('crawler_type', 'n8n_workflow'),
+                classifier_type="simplified-data-storage"
+            )
+            
+            classification_stored = success
+            if not success:
+                logger.error(f"Failed to store classification: {error}")
         except Exception as e:
-            logger.error(f"Error storing simplified data: {str(e)}")
+            logger.error(f"Error storing classification: {str(e)}")
             logger.error(f"Error details: {traceback.format_exc()}")
-            if conn:
-                conn.rollback()
-        finally:
-            if cursor:
-                cursor.close()
-            if conn:
-                conn.close()
         
         return jsonify({
-            "success": n8n_stored,
+            "success": content_stored or classification_stored,
             "message": "Data processed for Snowflake storage",
             "domain": data.get('domain', ''),
             "content_stored": content_stored,
-            "n8n_stored": n8n_stored
+            "classification_stored": classification_stored
         })
 
     @app.route('/store-classification-data', methods=['POST'])
