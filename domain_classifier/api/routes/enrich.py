@@ -81,13 +81,6 @@ def register_enrich_routes(app, snowflake_conn):
         word_count = data.get('word_count', 0)
         processed_at = data.get('processed_at')
         
-        # Complex JSON fields
-        social_media = json.dumps(data.get('social_media', {})) if data.get('social_media') else '{}'
-        department_stats = json.dumps(data.get('department_stats', {})) if data.get('department_stats') else '{}'
-        technologies = json.dumps(data.get('technologies', [])) if data.get('technologies') else '[]'
-        tags = json.dumps(data.get('tags', [])) if data.get('tags') else '[]'
-        data_sources = json.dumps(data.get('data_sources', {})) if data.get('data_sources') else '{}'
-        
         # For backward compatibility - extract these from nested structures if not directly provided
         if not content and 'apiPayload' in data and 'content' in data['apiPayload']:
             content = data['apiPayload']['content']
@@ -172,30 +165,18 @@ def register_enrich_routes(app, snowflake_conn):
                     # Set shorter query timeout
                     cursor.execute("ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS=20")
                     
-                    # Insert data into N8N_DOMAIN_CONTENT table with all fields
+                    # Insert basic fields first
                     query = """
                     INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.N8N_DOMAIN_CONTENT (
                         DOMAIN, COMPANY_NAME, COMPANY_DESCRIPTION, WEBSITE_URL, ADDRESS, 
                         PHONE, EMPLOYEE_COUNT, FOUNDED_YEAR, INDUSTRY, CLASSIFICATION,
                         CLASSIFICATION_CONFIDENCE, IS_PARKED_DOMAIN, PRIMARY_DEPARTMENT, 
                         PRIMARY_DEPARTMENT_COUNT, ACTIVE_DEPARTMENTS, ORG_SECTOR, 
-                        CONTENT, CRAWLER_TYPE, PAGES_CRAWLED, WORD_COUNT,
-                        PROCESSED_AT, SOCIAL_MEDIA, DEPARTMENT_STATS, TECHNOLOGIES,
-                        TAGS, DATA_SOURCES
+                        CONTENT, CRAWLER_TYPE, PAGES_CRAWLED, WORD_COUNT, PROCESSED_AT
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
-                            PARSE_JSON(%s), PARSE_JSON(%s), PARSE_JSON(%s), PARSE_JSON(%s), PARSE_JSON(%s))
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
+                            CURRENT_TIMESTAMP())
                     """
-                    
-                    # Convert processed_at to datetime if it's a string
-                    processed_datetime = processed_at
-                    if isinstance(processed_at, str):
-                        try:
-                            processed_datetime = datetime.fromisoformat(processed_at.replace('Z', '+00:00'))
-                        except:
-                            processed_datetime = datetime.now()
-                    elif not processed_at:
-                        processed_datetime = datetime.now()
                     
                     # Execute the query with all parameters
                     cursor.execute(query, (
@@ -218,14 +199,74 @@ def register_enrich_routes(app, snowflake_conn):
                         content,
                         crawler_type,
                         pages_crawled,
-                        word_count,
-                        processed_datetime,
-                        social_media,
-                        department_stats,
-                        technologies,
-                        tags,
-                        data_sources
+                        word_count
                     ))
+                    
+                    # Now update the complex fields separately
+                    if data.get('social_media'):
+                        social_media_json = json.dumps(data.get('social_media'))
+                        update_query = """
+                        UPDATE DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.N8N_DOMAIN_CONTENT
+                        SET SOCIAL_MEDIA = PARSE_JSON(%s)
+                        WHERE DOMAIN = %s AND PROCESSED_AT = (
+                            SELECT MAX(PROCESSED_AT) 
+                            FROM DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.N8N_DOMAIN_CONTENT
+                            WHERE DOMAIN = %s
+                        )
+                        """
+                        cursor.execute(update_query, (social_media_json, domain, domain))
+                    
+                    if data.get('department_stats'):
+                        dept_json = json.dumps(data.get('department_stats'))
+                        update_query = """
+                        UPDATE DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.N8N_DOMAIN_CONTENT
+                        SET DEPARTMENT_STATS = PARSE_JSON(%s)
+                        WHERE DOMAIN = %s AND PROCESSED_AT = (
+                            SELECT MAX(PROCESSED_AT) 
+                            FROM DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.N8N_DOMAIN_CONTENT
+                            WHERE DOMAIN = %s
+                        )
+                        """
+                        cursor.execute(update_query, (dept_json, domain, domain))
+                    
+                    if data.get('technologies'):
+                        tech_json = json.dumps(data.get('technologies'))
+                        update_query = """
+                        UPDATE DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.N8N_DOMAIN_CONTENT
+                        SET TECHNOLOGIES = PARSE_JSON(%s)
+                        WHERE DOMAIN = %s AND PROCESSED_AT = (
+                            SELECT MAX(PROCESSED_AT) 
+                            FROM DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.N8N_DOMAIN_CONTENT
+                            WHERE DOMAIN = %s
+                        )
+                        """
+                        cursor.execute(update_query, (tech_json, domain, domain))
+                    
+                    if data.get('tags'):
+                        tags_json = json.dumps(data.get('tags'))
+                        update_query = """
+                        UPDATE DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.N8N_DOMAIN_CONTENT
+                        SET TAGS = PARSE_JSON(%s)
+                        WHERE DOMAIN = %s AND PROCESSED_AT = (
+                            SELECT MAX(PROCESSED_AT) 
+                            FROM DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.N8N_DOMAIN_CONTENT
+                            WHERE DOMAIN = %s
+                        )
+                        """
+                        cursor.execute(update_query, (tags_json, domain, domain))
+                    
+                    if data.get('data_sources'):
+                        sources_json = json.dumps(data.get('data_sources'))
+                        update_query = """
+                        UPDATE DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.N8N_DOMAIN_CONTENT
+                        SET DATA_SOURCES = PARSE_JSON(%s)
+                        WHERE DOMAIN = %s AND PROCESSED_AT = (
+                            SELECT MAX(PROCESSED_AT) 
+                            FROM DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.N8N_DOMAIN_CONTENT
+                            WHERE DOMAIN = %s
+                        )
+                        """
+                        cursor.execute(update_query, (sources_json, domain, domain))
                     
                     # Commit the transaction
                     conn.commit()
@@ -249,7 +290,6 @@ def register_enrich_routes(app, snowflake_conn):
             "classification_stored": classification_stored,
             "n8n_content_stored": n8n_content_stored
         })
-
     @app.route('/classify-and-enrich', methods=['POST', 'OPTIONS'])
     def classify_and_enrich():
         """Classify a domain and enrich it with Apollo data"""
