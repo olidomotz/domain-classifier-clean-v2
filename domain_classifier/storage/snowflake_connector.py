@@ -394,8 +394,8 @@ class SnowflakeConnector:
             if conn:
                 conn.close()
     
-    def save_classification(self, domain, company_type, confidence_score, all_scores, 
-                           model_metadata, low_confidence, detection_method, 
+    def save_classification(self, domain, company_type=None, confidence_score=0, all_scores=None, 
+                           model_metadata=None, low_confidence=False, detection_method="auto", 
                            llm_explanation=None, apollo_company_data=None, 
                            crawler_type=None, classifier_type=None, bulk_process_id=None):
         """Save domain classification to Snowflake with explanation and Apollo data."""
@@ -421,16 +421,27 @@ class SnowflakeConnector:
                 else:
                     llm_explanation = llm_explanation[:4900] + "..."
             
+            # Convert dictionary parameters to JSON strings
+            if all_scores is not None and isinstance(all_scores, dict):
+                all_scores = json.dumps(all_scores)
+            elif all_scores is None:
+                all_scores = '{}'
+                
+            if model_metadata is not None and isinstance(model_metadata, dict):
+                model_metadata = json.dumps(model_metadata)
+            elif model_metadata is None:
+                model_metadata = '{}'
+            
             # Basic fields that are always included
             basic_query = """
                 INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION 
                 (domain, company_type, confidence_score, all_scores, model_metadata, 
                 low_confidence, detection_method, classification_date, llm_explanation,
                 crawler_type, classifier_type, bulk_process_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP(), %s, %s, %s, %s)
+                VALUES (%s, %s, %s, PARSE_JSON(%s), PARSE_JSON(%s), %s, %s, CURRENT_TIMESTAMP(), %s, %s, %s, %s)
             """
             
-            basic_params = [
+            basic_params = (
                 domain, 
                 company_type, 
                 confidence_score, 
@@ -442,12 +453,13 @@ class SnowflakeConnector:
                 crawler_type,
                 classifier_type,
                 bulk_process_id  # Add bulk_process_id parameter
-            ]
+            )
             
             # Execute the basic insert
             cursor.execute(basic_query, basic_params)
             
             # If we have Apollo data, update the record with separate statements
+            apollo_company_json = None
             if apollo_company_data:
                 # Convert to JSON string if it's not already
                 if isinstance(apollo_company_data, dict):
@@ -458,14 +470,14 @@ class SnowflakeConnector:
                 # Run an UPDATE statement instead of trying to include in the INSERT
                 company_update = """
                     UPDATE DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION
-                    SET apollo_company_data = TO_VARIANT(%s)
+                    SET apollo_company_data = PARSE_JSON(%s)
                     WHERE domain = %s AND classification_date = (
                         SELECT MAX(classification_date) 
                         FROM DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION
                         WHERE domain = %s
                     )
                 """
-                cursor.execute(company_update, [apollo_company_json, domain, domain])
+                cursor.execute(company_update, (apollo_company_json, domain, domain))
             
             conn.commit()
             logger.info(f"Saved classification with Apollo data for {domain}: {company_type}")
@@ -483,7 +495,7 @@ class SnowflakeConnector:
                     'MODEL_METADATA': model_metadata,
                     'CLASSIFICATION_DATE': datetime.now().isoformat(),
                     'LLM_EXPLANATION': llm_explanation,
-                    'APOLLO_COMPANY_DATA': apollo_company_json if 'apollo_company_json' in locals() else None,
+                    'APOLLO_COMPANY_DATA': apollo_company_json,
                     'CRAWLER_TYPE': crawler_type,
                     'CLASSIFIER_TYPE': classifier_type,
                     'BULK_PROCESS_ID': bulk_process_id  # Include bulk_process_id
