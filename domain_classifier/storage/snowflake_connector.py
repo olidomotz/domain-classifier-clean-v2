@@ -21,6 +21,31 @@ CLASSIFICATION_CACHE = {}
 # Cache expiry in seconds (5 minutes)
 CACHE_EXPIRY = 300
 
+def safe_params(params):
+    """
+    Ensure all parameters are safe for Snowflake by converting any dictionaries 
+    to JSON strings.
+    
+    Args:
+        params: The parameters tuple/list to process
+        
+    Returns:
+        A new tuple with all dictionaries converted to JSON strings
+    """
+    if not isinstance(params, (list, tuple)):
+        return params
+        
+    safe_params = []
+    for param in params:
+        if isinstance(param, dict):
+            safe_params.append(json.dumps(param))
+        elif isinstance(param, list):
+            safe_params.append(json.dumps(param))
+        else:
+            safe_params.append(param)
+            
+    return tuple(safe_params)
+
 class SnowflakeConnector:
     def __init__(self):
         """Initialize Snowflake connection with environment variables."""
@@ -421,16 +446,12 @@ class SnowflakeConnector:
                 else:
                     llm_explanation = llm_explanation[:4900] + "..."
             
-            # Convert dictionary parameters to JSON strings
-            if all_scores is not None and isinstance(all_scores, dict):
-                all_scores = json.dumps(all_scores)
-            elif all_scores is None:
-                all_scores = '{}'
-                
-            if model_metadata is not None and isinstance(model_metadata, dict):
-                model_metadata = json.dumps(model_metadata)
-            elif model_metadata is None:
-                model_metadata = '{}'
+            # Convert all complex parameters to strings - this is critical
+            all_scores_str = json.dumps(all_scores) if isinstance(all_scores, (dict, list)) else (all_scores or '{}')
+            model_metadata_str = json.dumps(model_metadata) if isinstance(model_metadata, (dict, list)) else (model_metadata or '{}')
+            
+            # Log the types for debugging
+            logger.info(f"Parameter types before SQL: all_scores={type(all_scores_str)}, model_metadata={type(model_metadata_str)}")
             
             # Basic fields that are always included
             basic_query = """
@@ -441,32 +462,32 @@ class SnowflakeConnector:
                 VALUES (%s, %s, %s, PARSE_JSON(%s), PARSE_JSON(%s), %s, %s, CURRENT_TIMESTAMP(), %s, %s, %s, %s)
             """
             
+            # Prepare parameters as a tuple, ensuring no dictionaries
             basic_params = (
                 domain, 
                 company_type, 
                 confidence_score, 
-                all_scores, 
-                model_metadata, 
+                all_scores_str,
+                model_metadata_str,
                 low_confidence, 
                 detection_method,
                 llm_explanation,
                 crawler_type,
                 classifier_type,
-                bulk_process_id  # Add bulk_process_id parameter
+                bulk_process_id
             )
             
             # Execute the basic insert
             cursor.execute(basic_query, basic_params)
             
             # If we have Apollo data, update the record with separate statements
-            apollo_company_json = None
             if apollo_company_data:
-                # Convert to JSON string if it's not already
-                if isinstance(apollo_company_data, dict):
+                # Convert to JSON string if it's a dict
+                if isinstance(apollo_company_data, (dict, list)):
                     apollo_company_json = json.dumps(apollo_company_data)
                 else:
                     apollo_company_json = apollo_company_data
-                    
+                
                 # Run an UPDATE statement instead of trying to include in the INSERT
                 company_update = """
                     UPDATE DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION
@@ -480,25 +501,25 @@ class SnowflakeConnector:
                 cursor.execute(company_update, (apollo_company_json, domain, domain))
             
             conn.commit()
-            logger.info(f"Saved classification with Apollo data for {domain}: {company_type}")
+            logger.info(f"Saved classification for {domain}: {company_type}")
             
-            # Update the cache with new data - create a record similar to what check_existing_classification returns
+            # Update the cache with new data
             try:
                 # Create a record in the same format as the SELECT query
                 new_record = {
                     'DOMAIN': domain,
                     'COMPANY_TYPE': company_type,
                     'CONFIDENCE_SCORE': confidence_score,
-                    'ALL_SCORES': all_scores,
+                    'ALL_SCORES': all_scores_str,
                     'LOW_CONFIDENCE': low_confidence,
                     'DETECTION_METHOD': detection_method,
-                    'MODEL_METADATA': model_metadata,
+                    'MODEL_METADATA': model_metadata_str,
                     'CLASSIFICATION_DATE': datetime.now().isoformat(),
                     'LLM_EXPLANATION': llm_explanation,
-                    'APOLLO_COMPANY_DATA': apollo_company_json,
+                    'APOLLO_COMPANY_DATA': apollo_company_json if 'apollo_company_json' in locals() else None,
                     'CRAWLER_TYPE': crawler_type,
                     'CLASSIFIER_TYPE': classifier_type,
-                    'BULK_PROCESS_ID': bulk_process_id  # Include bulk_process_id
+                    'BULK_PROCESS_ID': bulk_process_id
                 }
                 
                 # Update both caches
@@ -516,5 +537,57 @@ class SnowflakeConnector:
             logger.error(f"Error saving classification: {error_msg}")
             return False, error_msg
         finally:
+            if cursor:
+                cursor.close()
+            if conn:
+                conn.close()
+                
+    def execute_safe_query(self, query, params):
+        """
+        Execute a query with parameters safely, ensuring all complex types are properly handled.
+        
+        Args:
+            query: SQL query to execute
+            params: Parameters to bind to query
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        conn = None
+        cursor = None
+        try:
+            conn = self.get_connection()
+            if not conn:
+                logger.error("Failed to get connection for safe query execution")
+                return False
+                
+            cursor = conn.cursor()
+            cursor.execute("ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS=20")
+            
+            # Convert any dictionaries to JSON strings
+            safe_parameter_list = []
+            for param in params:
+                if isinstance(param, (dict, list)):
+                    safe_parameter_list.append(json.dumps(param))
+                else:
+                    safe_parameter_list.append(param)
+                    
+            # Log the types for debugging
+            param_types = [f"{i}: {type(p).__name__}" for i, p in enumerate(safe_parameter_list)]
+            logger.info(f"Safe parameter types: {param_types}")
+            
+            cursor.execute(query, tuple(safe_parameter_list))
+            conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Error executing safe query: {e}")
+            logger.error(f"Query: {query}")
+            logger.error(f"Parameters: {params}")
+            if conn:
+                conn.rollback()
+            return False
+        finally:
+            if cursor:
+                cursor.close()
             if conn:
                 conn.close()
