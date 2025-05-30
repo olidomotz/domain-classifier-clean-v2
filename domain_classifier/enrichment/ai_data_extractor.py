@@ -286,7 +286,7 @@ def _extract_with_patterns(content: str, domain: str) -> Dict[str, Any]:
         if not company_data["email"] and company_emails:
             company_data["email"] = company_emails[0]
     
-    # Extract address - IMPROVED PATTERN WITH BETTER VALIDATION
+    # Extract address - FIXED PATTERN WITH ERROR HANDLING
     address_patterns = [
         # Street address with number - most reliable pattern
         r'(?:address|location|headquarters|offices?|located at|find us at)(?:\s|:)+([0-9]+\s+[a-zA-Z]+\s+(?:street|st\.?|avenue|ave\.?|road|rd\.?|boulevard|blvd\.?|drive|dr\.?|lane|ln\.?|place|pl\.?|court|ct\.?)(?:\s|\.|,)[^,\n]{3,40}(?:,\s*[a-zA-Z\s]+){1,3})',
@@ -300,7 +300,7 @@ def _extract_with_patterns(content: str, domain: str) -> Dict[str, Any]:
     
     for pattern in address_patterns:
         match = re.search(pattern, content, re.IGNORECASE)
-        if match:
+        if match and match.groups() and len(match.groups()) >= 1:  # Fixed: Check if groups exist and have at least 1 element
             full_address = match.group(1).strip()
             
             # Further validation to ensure it looks like an address
