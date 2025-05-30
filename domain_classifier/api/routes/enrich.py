@@ -127,7 +127,10 @@ def register_enrich_routes(app, snowflake_conn):
                 # Extract fields for backward compatibility
                 apollo_data = data.get('apollo_data', {})
                 # Ensure apollo_data is a JSON string, not a dict
-                apollo_json = json.dumps(apollo_data) if isinstance(apollo_data, dict) else (apollo_data or None)
+                if isinstance(apollo_data, dict):
+                    apollo_json = json.dumps(apollo_data)
+                else:
+                    apollo_json = apollo_data or None
                 
                 confidence_score = classification_confidence or 0
                 confidence_scores = "{}"  # Default empty JSON
@@ -135,7 +138,8 @@ def register_enrich_routes(app, snowflake_conn):
                 # Try to get from nested structure if available
                 if 'apiPayload' in data and 'classification' in data['apiPayload']:
                     confidence_scores_dict = data['apiPayload']['classification'].get('confidence_scores', {})
-                    confidence_scores = json.dumps(confidence_scores_dict) if isinstance(confidence_scores_dict, dict) else '{}'
+                    if isinstance(confidence_scores_dict, dict):
+                        confidence_scores = json.dumps(confidence_scores_dict)
                 
                 # For backward compatibility
                 explanation = ""
