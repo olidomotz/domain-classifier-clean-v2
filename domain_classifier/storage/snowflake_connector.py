@@ -396,8 +396,8 @@ class SnowflakeConnector:
     
     def save_classification(self, domain, company_type=None, confidence_score=0, all_scores=None, 
                            model_metadata=None, low_confidence=False, detection_method="auto", 
-                           llm_explanation=None, apollo_company_data=None, 
-                           crawler_type=None, classifier_type=None, bulk_process_id=None):
+                           llm_explanation=None, apollo_company_data=None, crawler_type=None, 
+                           classifier_type=None, bulk_process_id=None):
         """Save domain classification to Snowflake with explanation and Apollo data."""
         if not self.connected:
             logger.info(f"Fallback: Not saving classification for {domain}")
