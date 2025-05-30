@@ -41,11 +41,11 @@ def register_enrich_routes(app, snowflake_conn):
         app = Flask(__name__)
         logger.info("Created new Flask app as fallback in enrich.py")
 
-    @app.route('/store-simple-data', methods=['POST'])
-    def store_simple_data():
+    @app.route('/direct-n8n-store', methods=['POST'])
+    def direct_n8n_store():
         """
-        Simplified endpoint for storing flat data from n8n workflow.
-        This uses existing tables rather than trying to create new ones.
+        Direct endpoint for storing data in N8N_DOMAIN_CONTENT table.
+        This uses a simplified approach with raw SQL to avoid Snowflake parameter binding issues.
         """
         from domain_classifier.storage.snowflake_connector import SnowflakeConnector
         
@@ -58,8 +58,8 @@ def register_enrich_routes(app, snowflake_conn):
                 "message": "Invalid request: domain is required"
             }), 400
         
-        # Log the types of incoming data
-        logger.info(f"Received simplified data for domain: {data.get('domain')}")
+        # Log the incoming request
+        logger.info(f"Received direct store request for domain: {data.get('domain')}")
         
         # Initialize Snowflake connector
         snowflake_conn = SnowflakeConnector()
@@ -80,70 +80,127 @@ def register_enrich_routes(app, snowflake_conn):
             except Exception as e:
                 logger.error(f"Error storing content: {str(e)}")
         
-        # Store classification in the existing classification table
-        classification_stored = False
+        # Store directly in N8N_DOMAIN_CONTENT table using direct SQL
+        n8n_stored = False
+        conn = None
+        cursor = None
         try:
-            # Convert dictionaries to JSON strings
-            all_scores = json.dumps({
-                "Managed Service Provider": data.get('classification_confidence', 0),
-                "Integrator - Commercial A/V": 0,
-                "Integrator - Residential A/V": 0,
-                "Internal IT Department": 0
-            })
-            
-            model_metadata = json.dumps({
-                "source": "n8n_workflow_simplified"
-            })
-            
-            # Convert social media and other complex objects to JSON strings for Apollo data
-            social_media = {}
-            if data.get('social_media_json'):
-                try:
-                    social_media = json.loads(data.get('social_media_json'))
-                except:
-                    pass
+            conn = snowflake_conn.get_connection()
+            if conn:
+                cursor = conn.cursor()
+                # Set shorter query timeout
+                cursor.execute("ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS=20")
+                
+                # Prepare all values, ensuring no complex types
+                domain = str(data.get('domain', ''))
+                company_name = str(data.get('company_name', ''))
+                company_description = str(data.get('company_description', ''))
+                website_url = str(data.get('website_url', ''))
+                address = str(data.get('address', ''))
+                phone = str(data.get('phone', ''))
+                employee_count = int(data.get('employee_count', 0))
+                founded_year = int(data.get('founded_year', 0))
+                industry = str(data.get('industry', ''))
+                classification = str(data.get('classification', ''))
+                classification_confidence = float(data.get('classification_confidence', 0))
+                is_parked_domain = bool(data.get('is_parked_domain', False))
+                primary_department = str(data.get('primary_department', ''))
+                primary_department_count = int(data.get('primary_department_count', 0))
+                active_departments = int(data.get('active_departments', 0))
+                org_sector = str(data.get('org_sector', ''))
+                content = str(data.get('content', ''))
+                crawler_type = str(data.get('crawler_type', 'n8n_workflow'))
+                pages_crawled = int(data.get('pages_crawled', 0))
+                word_count = int(data.get('word_count', 0))
+                
+                # Ensure we have valid JSON strings for complex data
+                social_media_str = data.get('social_media_json', '{}')
+                if not social_media_str or social_media_str == 'undefined':
+                    social_media_str = '{}'
                     
-            apollo_data = {
-                "name": data.get('company_name', ''),
-                "description": data.get('company_description', ''),
-                "industry": data.get('industry', ''),
-                "phone": data.get('phone', ''),
-                "address": data.get('address', ''),
-                "employee_count": data.get('employee_count', 0),
-                "founded_year": data.get('founded_year', 0),
-                "social_media": social_media
-            }
-            
-            apollo_json = json.dumps(apollo_data)
-            
-            # Store in original classification table
-            success, error = snowflake_conn.save_classification(
-                domain=data.get('domain'),
-                company_type=data.get('classification'),
-                confidence_score=data.get('classification_confidence', 0),
-                all_scores=all_scores,
-                model_metadata=model_metadata,
-                low_confidence=data.get('classification_confidence', 0) < 30,
-                detection_method="n8n_simple_data",
-                llm_explanation=data.get('explanation', ''),
-                apollo_company_data=apollo_json,
-                crawler_type=data.get('crawler_type', 'n8n_workflow'),
-                classifier_type="simplified-data-storage"
-            )
-            
-            classification_stored = success
-            if not success:
-                logger.error(f"Failed to store classification: {error}")
+                department_stats_str = data.get('department_stats_json', '{}')
+                if not department_stats_str or department_stats_str == 'undefined':
+                    department_stats_str = '{}'
+                    
+                technologies_str = data.get('technologies_json', '[]')
+                if not technologies_str or technologies_str == 'undefined':
+                    technologies_str = '[]'
+                    
+                tags_str = data.get('tags_json', '[]')
+                if not tags_str or tags_str == 'undefined':
+                    tags_str = '[]'
+                    
+                data_sources_str = data.get('data_sources_json', '{}')
+                if not data_sources_str or data_sources_str == 'undefined':
+                    data_sources_str = '{}'
+                
+                # Build the direct SQL query with literals for non-string types
+                # and proper escaping for strings
+                query = f"""
+                INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.N8N_DOMAIN_CONTENT (
+                    DOMAIN, COMPANY_NAME, COMPANY_DESCRIPTION, WEBSITE_URL, ADDRESS, 
+                    PHONE, EMPLOYEE_COUNT, FOUNDED_YEAR, INDUSTRY, CLASSIFICATION,
+                    CLASSIFICATION_CONFIDENCE, IS_PARKED_DOMAIN, PRIMARY_DEPARTMENT, 
+                    PRIMARY_DEPARTMENT_COUNT, ACTIVE_DEPARTMENTS, ORG_SECTOR, 
+                    CONTENT, CRAWLER_TYPE, PAGES_CRAWLED, WORD_COUNT,
+                    PROCESSED_AT, SOCIAL_MEDIA, DEPARTMENT_STATS, TECHNOLOGIES,
+                    TAGS, DATA_SOURCES
+                )
+                VALUES (
+                    '{domain.replace("'", "''")}',
+                    '{company_name.replace("'", "''")}',
+                    '{company_description.replace("'", "''")}',
+                    '{website_url.replace("'", "''")}',
+                    '{address.replace("'", "''")}',
+                    '{phone.replace("'", "''")}',
+                    {employee_count},
+                    {founded_year},
+                    '{industry.replace("'", "''")}',
+                    '{classification.replace("'", "''")}',
+                    {classification_confidence},
+                    {str(is_parked_domain).upper()},
+                    '{primary_department.replace("'", "''")}',
+                    {primary_department_count},
+                    {active_departments},
+                    '{org_sector.replace("'", "''")}',
+                    '{content.replace("'", "''")}',
+                    '{crawler_type.replace("'", "''")}',
+                    {pages_crawled},
+                    {word_count},
+                    CURRENT_TIMESTAMP(),
+                    PARSE_JSON('{social_media_str.replace("'", "''")}'),
+                    PARSE_JSON('{department_stats_str.replace("'", "''")}'),
+                    PARSE_JSON('{technologies_str.replace("'", "''")}'),
+                    PARSE_JSON('{tags_str.replace("'", "''")}'),
+                    PARSE_JSON('{data_sources_str.replace("'", "''")}')
+                )
+                """
+                
+                # Execute the query without binding parameters
+                cursor.execute(query)
+                conn.commit()
+                
+                n8n_stored = True
+                logger.info(f"Successfully stored data for {domain} using direct SQL")
+            else:
+                logger.error("Failed to get Snowflake connection")
         except Exception as e:
-            logger.error(f"Error storing classification: {str(e)}")
+            logger.error(f"Error storing data: {str(e)}")
             logger.error(f"Error details: {traceback.format_exc()}")
+            if conn:
+                conn.rollback()
+        finally:
+            if cursor:
+                cursor.close()
+            if conn:
+                conn.close()
         
         return jsonify({
-            "success": content_stored or classification_stored,
+            "success": content_stored or n8n_stored,
             "message": "Data processed for Snowflake storage",
             "domain": data.get('domain', ''),
             "content_stored": content_stored,
-            "classification_stored": classification_stored
+            "n8n_stored": n8n_stored
         })
 
     @app.route('/store-classification-data', methods=['POST'])
@@ -277,100 +334,76 @@ def register_enrich_routes(app, snowflake_conn):
             except Exception as e:
                 logger.error(f"Error storing classification for {domain}: {str(e)}")
         
-        # Store data in N8N_DOMAIN_CONTENT table
+        # Store data in N8N_DOMAIN_CONTENT table using direct SQL to avoid parameter binding issues
         n8n_content_stored = False
+        conn = None
+        cursor = None
         try:
-            # Get a connection using the existing method
             conn = snowflake_conn.get_connection()
             if conn:
-                cursor = None
-                try:
-                    cursor = conn.cursor()
-                    # Set shorter query timeout
-                    cursor.execute("ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS=20")
-                    
-                    # Log the parameter types for debugging
-                    logger.info(f"N8N_DOMAIN_CONTENT parameters: social_media={type(social_media_json)}, "
-                              f"department_stats={type(department_stats_json)}, technologies={type(technologies_json)}")
-                    
-                    # Insert all fields with PARSE_JSON for VARIANT columns
-                    query = """
-                    INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.N8N_DOMAIN_CONTENT (
-                        DOMAIN, COMPANY_NAME, COMPANY_DESCRIPTION, WEBSITE_URL, ADDRESS, 
-                        PHONE, EMPLOYEE_COUNT, FOUNDED_YEAR, INDUSTRY, CLASSIFICATION,
-                        CLASSIFICATION_CONFIDENCE, IS_PARKED_DOMAIN, PRIMARY_DEPARTMENT, 
-                        PRIMARY_DEPARTMENT_COUNT, ACTIVE_DEPARTMENTS, ORG_SECTOR, 
-                        CONTENT, CRAWLER_TYPE, PAGES_CRAWLED, WORD_COUNT,
-                        PROCESSED_AT, SOCIAL_MEDIA, DEPARTMENT_STATS, TECHNOLOGIES,
-                        TAGS, DATA_SOURCES
-                    )
-                    VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
-                        CURRENT_TIMESTAMP(),
-                        PARSE_JSON(%s),
-                        PARSE_JSON(%s),
-                        PARSE_JSON(%s),
-                        PARSE_JSON(%s),
-                        PARSE_JSON(%s)
-                    )
-                    """
-                    
-                    # Execute the query with properly prepared parameters
-                    # CRITICAL: Ensure all parameters are of supported types
-                    cursor.execute(query, (
-                        domain,
-                        company_name,
-                        company_description,
-                        website_url,
-                        address,
-                        phone,
-                        employee_count,
-                        founded_year,
-                        industry,
-                        classification,
-                        classification_confidence,
-                        is_parked_domain,
-                        primary_department,
-                        primary_department_count,
-                        active_departments,
-                        org_sector,
-                        content,
-                        crawler_type,
-                        pages_crawled,
-                        word_count,
-                        social_media_json,      # These are all guaranteed to be strings now, not dicts
-                        department_stats_json,  # These are all guaranteed to be strings now, not dicts
-                        technologies_json,      # These are all guaranteed to be strings now, not dicts
-                        tags_json,              # These are all guaranteed to be strings now, not dicts
-                        data_sources_json       # These are all guaranteed to be strings now, not dicts
-                    ))
-                    
-                    # Commit the transaction
-                    conn.commit()
-                    
-                    n8n_content_stored = True
-                    logger.info(f"Saved data to N8N_DOMAIN_CONTENT table for {domain}")
-                except Exception as inner_e:
-                    logger.error(f"Error executing N8N_DOMAIN_CONTENT query: {str(inner_e)}")
-                    # Log more details about the error
-                    logger.error(f"Error details: {traceback.format_exc()}")
-                    if conn:
-                        conn.rollback()
-                finally:
-                    # Always close the cursor and connection
-                    if cursor:
-                        cursor.close()
-                    if conn:
-                        conn.close()
-            else:
-                logger.error("Failed to get Snowflake connection for N8N_DOMAIN_CONTENT insert")
+                cursor = conn.cursor()
+                cursor.execute("ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS=20")
                 
+                # Direct SQL insertion with proper escaping
+                query = f"""
+                INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.N8N_DOMAIN_CONTENT (
+                    DOMAIN, COMPANY_NAME, COMPANY_DESCRIPTION, WEBSITE_URL, ADDRESS, 
+                    PHONE, EMPLOYEE_COUNT, FOUNDED_YEAR, INDUSTRY, CLASSIFICATION,
+                    CLASSIFICATION_CONFIDENCE, IS_PARKED_DOMAIN, PRIMARY_DEPARTMENT, 
+                    PRIMARY_DEPARTMENT_COUNT, ACTIVE_DEPARTMENTS, ORG_SECTOR, 
+                    CONTENT, CRAWLER_TYPE, PAGES_CRAWLED, WORD_COUNT,
+                    PROCESSED_AT, SOCIAL_MEDIA, DEPARTMENT_STATS, TECHNOLOGIES,
+                    TAGS, DATA_SOURCES
+                )
+                VALUES (
+                    '{domain.replace("'", "''")}',
+                    '{company_name.replace("'", "''")}',
+                    '{company_description.replace("'", "''")}',
+                    '{website_url.replace("'", "''")}',
+                    '{address.replace("'", "''")}',
+                    '{phone.replace("'", "''")}',
+                    {employee_count},
+                    {founded_year},
+                    '{industry.replace("'", "''")}',
+                    '{classification.replace("'", "''")}',
+                    {classification_confidence},
+                    {str(is_parked_domain).upper()},
+                    '{primary_department.replace("'", "''")}',
+                    {primary_department_count},
+                    {active_departments},
+                    '{org_sector.replace("'", "''")}',
+                    '{content.replace("'", "''")}',
+                    '{crawler_type.replace("'", "''")}',
+                    {pages_crawled},
+                    {word_count},
+                    CURRENT_TIMESTAMP(),
+                    PARSE_JSON('{social_media_json.replace("'", "''")}'),
+                    PARSE_JSON('{department_stats_json.replace("'", "''")}'),
+                    PARSE_JSON('{technologies_json.replace("'", "''")}'),
+                    PARSE_JSON('{tags_json.replace("'", "''")}'),
+                    PARSE_JSON('{data_sources_json.replace("'", "''")}')
+                )
+                """
+                
+                cursor.execute(query)
+                conn.commit()
+                n8n_content_stored = True
+                logger.info(f"Saved data to N8N_DOMAIN_CONTENT table using direct SQL for {domain}")
+            else:
+                logger.error("Failed to get Snowflake connection")
         except Exception as e:
-            logger.error(f"Error storing data in N8N_DOMAIN_CONTENT table for {domain}: {str(e)}")
+            logger.error(f"Error storing data in N8N_DOMAIN_CONTENT table: {str(e)}")
             logger.error(f"Error details: {traceback.format_exc()}")
+            if conn:
+                conn.rollback()
+        finally:
+            if cursor:
+                cursor.close()
+            if conn:
+                conn.close()
         
         return jsonify({
-            "success": n8n_content_stored,  # Define success by the new table insert
+            "success": n8n_content_stored,
             "message": "Data processed for Snowflake storage",
             "domain": domain,
             "content_stored": content_stored,
