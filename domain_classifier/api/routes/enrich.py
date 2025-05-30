@@ -46,7 +46,7 @@ def register_enrich_routes(app, snowflake_conn):
         """
         Endpoint for storing classification data from n8n workflow.
         Stores both content and classification in Snowflake.
-        Uses a two-step approach for N8N_DOMAIN_CONTENT to avoid Snowflake parameter binding issues.
+        Uses a two-step approach for complex data to avoid Snowflake parameter binding issues.
         """
         from domain_classifier.storage.snowflake_connector import SnowflakeConnector
         
@@ -115,146 +115,76 @@ def register_enrich_routes(app, snowflake_conn):
             except Exception as e:
                 logger.error(f"Error storing content for {domain}: {str(e)}")
         
-        # Store classification data using direct SQL to avoid parameter binding issues
-        if classification:
-            try:
-                # Process apollo_data
-                apollo_data = data.get('apollo_data', {})
-                apollo_json = "{}"
-                if isinstance(apollo_data, dict):
-                    apollo_json = json.dumps(apollo_data)
-                elif apollo_data:
-                    apollo_json = apollo_data
-                
-                # Process confidence_scores
-                confidence_score = classification_confidence or 0
-                confidence_scores = "{}"
-                
-                if 'apiPayload' in data and 'classification' in data['apiPayload']:
-                    confidence_scores_dict = data['apiPayload']['classification'].get('confidence_scores', {})
-                    if isinstance(confidence_scores_dict, dict):
-                        confidence_scores = json.dumps(confidence_scores_dict)
-                
-                # Get explanation
-                explanation = ""
-                if 'apiPayload' in data and 'classification' in data['apiPayload']:
-                    explanation = data['apiPayload']['classification'].get('explanation', '')
-                    # Escape single quotes for SQL
-                    explanation = explanation.replace("'", "''")
-                
-                # Set model metadata
-                model_metadata = '{"source": "n8n_workflow"}'
-                
-                # Connect to Snowflake
-                conn = snowflake_conn.get_connection()
-                cursor = None
-                
-                if conn:
-                    try:
-                        cursor = conn.cursor()
-                        cursor.execute("ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS=20")
-                        
-                        # Direct SQL insertion for classification
-                        # CRITICAL: Use TO_VARIANT() instead of PARSE_JSON() for Snowflake
-                        query = f"""
-                        INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION 
-                        (domain, company_type, confidence_score, all_scores, model_metadata, 
-                        low_confidence, detection_method, classification_date, llm_explanation,
-                        apollo_company_data, crawler_type, classifier_type, bulk_process_id)
-                        VALUES (
-                            '{domain.replace("'", "''")}', 
-                            '{classification.replace("'", "''")}', 
-                            {confidence_score}, 
-                            TO_VARIANT('{confidence_scores}'), 
-                            TO_VARIANT('{model_metadata}'), 
-                            {str(confidence_score < 30).upper()}, 
-                            'n8n_claude_agent',
-                            CURRENT_TIMESTAMP(), 
-                            '{explanation}',
-                            TO_VARIANT('{apollo_json.replace("'", "''")}'),
-                            '{crawler_type.replace("'", "''")}',
-                            'claude-ai-agent',
-                            NULL
-                        )
-                        """
-                        
-                        cursor.execute(query)
-                        conn.commit()
-                        classification_stored = True
-                        logger.info(f"Saved classification for {domain}: {classification}")
-                    except Exception as e:
-                        logger.error(f"Error executing classification SQL: {str(e)}")
-                        if conn:
-                            conn.rollback()
-                    finally:
-                        if cursor:
-                            cursor.close()
-                        if conn:
-                            conn.close()
-            except Exception as e:
-                logger.error(f"Error processing classification data: {str(e)}")
-                logger.error(f"Error details: {traceback.format_exc()}")
-        
-        # Store data in N8N_DOMAIN_CONTENT table - now using two-step approach to avoid parameter binding issues
+        # Store data in N8N_DOMAIN_CONTENT table - using two-step approach to avoid parameter binding issues
         n8n_content_stored = False
         conn = None
         cursor = None
         try:
-            # Prepare JSON strings for VARIANT columns
+            # Get JSON data for complex fields
             social_media = {}
             department_stats = {}
             technologies = []
             tags = []
             data_sources = {}
             
-            # Try to extract from data structure
-            if 'social_media' in data and data['social_media']:
+            # Extract from data or apiPayload
+            if 'social_media' in data:
                 social_media = data.get('social_media')
-            elif 'social_media_json' in data and data['social_media_json']:
+            elif 'social_media_json' in data:
                 try:
                     social_media = json.loads(data.get('social_media_json'))
                 except:
                     pass
-                    
-            if 'department_stats' in data and data['department_stats']:
+            elif 'apiPayload' in data and 'social_media' in data['apiPayload']:
+                social_media = data['apiPayload'].get('social_media')
+                
+            if 'department_stats' in data:
                 department_stats = data.get('department_stats')
-            elif 'department_stats_json' in data and data['department_stats_json']:
+            elif 'department_stats_json' in data:
                 try:
                     department_stats = json.loads(data.get('department_stats_json'))
                 except:
                     pass
-                    
-            if 'technologies' in data and data['technologies']:
+            elif 'apiPayload' in data and 'department_stats' in data['apiPayload']:
+                department_stats = data['apiPayload'].get('department_stats')
+                
+            if 'technologies' in data:
                 technologies = data.get('technologies')
-            elif 'technologies_json' in data and data['technologies_json']:
+            elif 'technologies_json' in data:
                 try:
                     technologies = json.loads(data.get('technologies_json'))
                 except:
                     pass
-                    
-            if 'tags' in data and data['tags']:
+            elif 'apiPayload' in data and 'technologies' in data['apiPayload']:
+                technologies = data['apiPayload'].get('technologies')
+                
+            if 'tags' in data:
                 tags = data.get('tags')
-            elif 'tags_json' in data and data['tags_json']:
+            elif 'tags_json' in data:
                 try:
                     tags = json.loads(data.get('tags_json'))
                 except:
                     pass
-                    
-            if 'data_sources' in data and data['data_sources']:
+            elif 'apiPayload' in data and 'tags' in data['apiPayload']:
+                tags = data['apiPayload'].get('tags')
+                
+            if 'data_sources' in data:
                 data_sources = data.get('data_sources')
-            elif 'data_sources_json' in data and data['data_sources_json']:
+            elif 'data_sources_json' in data:
                 try:
                     data_sources = json.loads(data.get('data_sources_json'))
                 except:
                     pass
-                    
+            elif 'apiPayload' in data and 'data_sources' in data['apiPayload']:
+                data_sources = data['apiPayload'].get('data_sources')
+                
             # Get connection
             conn = snowflake_conn.get_connection()
             if conn:
                 cursor = conn.cursor()
                 cursor.execute("ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS=20")
                 
-                # Step 1: Insert the basic fields without any JSON/complex types
+                # STEP 1: Insert basic fields first without JSON
                 query = """
                 INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.N8N_DOMAIN_CONTENT (
                     DOMAIN, COMPANY_NAME, COMPANY_DESCRIPTION, WEBSITE_URL, ADDRESS, 
@@ -268,7 +198,7 @@ def register_enrich_routes(app, snowflake_conn):
                 )
                 """
                 
-                # Execute with only simple types in parameters - this works consistently
+                # Execute with only simple types in parameters
                 cursor.execute(query, (
                     domain,
                     company_name,
@@ -292,33 +222,42 @@ def register_enrich_routes(app, snowflake_conn):
                     word_count
                 ))
                 
-                # Step 2: Update the row we just inserted to add the complex JSON data using direct SQL
-                # Convert all complex data to JSON strings first
-                social_media_str = json.dumps(social_media)
-                department_stats_str = json.dumps(department_stats)
-                technologies_str = json.dumps(technologies)
-                tags_str = json.dumps(tags)
-                data_sources_str = json.dumps(data_sources)
+                # STEP 2: Update with JSON data using PARSE_JSON
+                # Convert all complex data to JSON strings
+                social_media_json = json.dumps(social_media)
+                department_stats_json = json.dumps(department_stats)
+                technologies_json = json.dumps(technologies)
+                tags_json = json.dumps(tags)
+                data_sources_json = json.dumps(data_sources)
                 
-                # Update using direct SQL with TO_VARIANT instead of PARSE_JSON
-                update_query = f"""
+                # Update using direct SQL with parameter binding - THIS IS THE KEY PART
+                update_query = """
                 UPDATE DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.N8N_DOMAIN_CONTENT
                 SET 
-                    SOCIAL_MEDIA = TO_VARIANT('{social_media_str.replace("'", "''")}'),
-                    DEPARTMENT_STATS = TO_VARIANT('{department_stats_str.replace("'", "''")}'),
-                    TECHNOLOGIES = TO_VARIANT('{technologies_str.replace("'", "''")}'),
-                    TAGS = TO_VARIANT('{tags_str.replace("'", "''")}'),
-                    DATA_SOURCES = TO_VARIANT('{data_sources_str.replace("'", "''")}')
+                    SOCIAL_MEDIA = PARSE_JSON(%s),
+                    DEPARTMENT_STATS = PARSE_JSON(%s),
+                    TECHNOLOGIES = PARSE_JSON(%s),
+                    TAGS = PARSE_JSON(%s),
+                    DATA_SOURCES = PARSE_JSON(%s)
                 WHERE 
-                    DOMAIN = '{domain.replace("'", "''")}'
+                    DOMAIN = %s
                     AND PROCESSED_AT = (
                         SELECT MAX(PROCESSED_AT) 
                         FROM DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.N8N_DOMAIN_CONTENT
-                        WHERE DOMAIN = '{domain.replace("'", "''")}'
+                        WHERE DOMAIN = %s
                     )
                 """
                 
-                cursor.execute(update_query)
+                cursor.execute(update_query, (
+                    social_media_json,
+                    department_stats_json,
+                    technologies_json,
+                    tags_json,
+                    data_sources_json,
+                    domain,
+                    domain
+                ))
+                
                 conn.commit()
                 
                 n8n_content_stored = True
@@ -336,8 +275,120 @@ def register_enrich_routes(app, snowflake_conn):
             if conn:
                 conn.close()
         
+        # For classification, skip it if it fails - we already have the data in N8N_DOMAIN_CONTENT
+        if classification and not classification_stored:
+            try:
+                # Extract fields for backward compatibility
+                apollo_data = data.get('apollo_data', {})
+                
+                # Convert all complex data to strings BEFORE passing to save_classification
+                apollo_json = None
+                if apollo_data:
+                    if isinstance(apollo_data, dict):
+                        apollo_json = json.dumps(apollo_data)
+                    else:
+                        apollo_json = apollo_data
+                        
+                confidence_score = classification_confidence or 0
+                
+                # Handle confidence_scores
+                confidence_scores = None
+                if 'apiPayload' in data and 'classification' in data['apiPayload']:
+                    confidence_scores_dict = data['apiPayload']['classification'].get('confidence_scores', {})
+                    if confidence_scores_dict:
+                        confidence_scores = json.dumps(confidence_scores_dict)
+                
+                if not confidence_scores:
+                    # Create a simple confidence_scores object
+                    scores_dict = {
+                        "Managed Service Provider": 0,
+                        "Integrator - Commercial A/V": 0,
+                        "Integrator - Residential A/V": 0,
+                        "Internal IT Department": 0
+                    }
+                    
+                    # Set the score for the classification
+                    if classification in scores_dict:
+                        scores_dict[classification] = confidence_score
+                    
+                    confidence_scores = json.dumps(scores_dict)
+                
+                # For backward compatibility
+                explanation = ""
+                if 'apiPayload' in data and 'classification' in data['apiPayload']:
+                    explanation = data['apiPayload']['classification'].get('explanation', '')
+                
+                # Create a simple model_metadata
+                model_metadata = json.dumps({"source": "n8n_workflow"})
+                
+                # We'll skip saving classification if it fails - not critical since we have data in N8N_DOMAIN_CONTENT
+                conn = snowflake_conn.get_connection()
+                if conn:
+                    try:
+                        cursor = conn.cursor()
+                        cursor.execute("ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS=20")
+                        
+                        # Use this direct SQL with proper parameter binding for the JSON data
+                        # This is key - we're using parameter binding with PARSE_JSON here
+                        query = """
+                        INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION 
+                        (domain, company_type, confidence_score, all_scores, model_metadata, 
+                        low_confidence, detection_method, classification_date, llm_explanation,
+                        crawler_type, classifier_type, bulk_process_id)
+                        VALUES (
+                            %s, %s, %s, 
+                            PARSE_JSON(%s), 
+                            PARSE_JSON(%s), 
+                            %s, %s, CURRENT_TIMESTAMP(), %s, %s, %s, NULL
+                        )
+                        """
+                        
+                        cursor.execute(query, (
+                            domain, 
+                            classification, 
+                            confidence_score,
+                            confidence_scores,
+                            model_metadata,
+                            confidence_score < 30,
+                            "n8n_claude_agent",
+                            explanation,
+                            crawler_type,
+                            "claude-ai-agent"
+                        ))
+                        
+                        # If we have Apollo data, update it separately
+                        if apollo_json:
+                            update_query = """
+                            UPDATE DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION
+                            SET apollo_company_data = PARSE_JSON(%s)
+                            WHERE domain = %s AND classification_date = (
+                                SELECT MAX(classification_date) 
+                                FROM DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION
+                                WHERE domain = %s
+                            )
+                            """
+                            
+                            cursor.execute(update_query, (apollo_json, domain, domain))
+                        
+                        conn.commit()
+                        classification_stored = True
+                        logger.info(f"Successfully stored classification for {domain}")
+                    except Exception as inner_e:
+                        # This is just a nice-to-have, so log the error but continue
+                        logger.error(f"Error storing classification: {str(inner_e)}")
+                        if conn:
+                            conn.rollback()
+                    finally:
+                        if cursor:
+                            cursor.close()
+                        if conn:
+                            conn.close()
+            except Exception as e:
+                # This is not critical, so just log and continue
+                logger.error(f"Error processing classification data: {str(e)}")
+        
         return jsonify({
-            "success": n8n_content_stored,
+            "success": n8n_content_stored,  # Define success by the new table insert
             "message": "Data processed for Snowflake storage",
             "domain": domain,
             "content_stored": content_stored,
